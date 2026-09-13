@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { SessionSummary } from "../session/types.js";
+import { DogAvatar } from "./dog-avatar.js";
 
 export interface SessionPickerProps {
   sessions: SessionSummary[];
@@ -33,7 +34,8 @@ export function SessionPicker({
 
   return (
     <Box flexDirection="column">
-      <Text bold>MewCode — 选择会话</Text>
+      <DogAvatar />
+      <Text bold>选择会话</Text>
       <Text dimColor>↑/↓ 移动，Enter 确认</Text>
       <Box flexDirection="column" marginTop={1}>
         <Text color={selected === 0 ? "blue" : undefined}>

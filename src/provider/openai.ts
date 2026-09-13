@@ -1,10 +1,11 @@
 import type { ProviderConfig } from "../config/types.js";
+import type { ChatMessage } from "../session/types.js";
+import type { ToolDefinition } from "../tools/types.js";
 import type { ChatProvider, ChatRequest, StreamEvent } from "./types.js";
 
 /** 将 base_url 规范为可拼接 /chat/completions 的根地址 */
 export function normalizeOpenAIBaseUrl(baseUrl: string): string {
   let u = baseUrl.trim().replace(/\/+$/, "");
-  // DeepSeek 官方既可用 https://api.deepseek.com 也可带 /v1
   if (u.endsWith("/chat/completions")) {
     u = u.slice(0, -"/chat/completions".length);
   }
@@ -20,13 +21,16 @@ export function createOpenAIProvider(config: ProviderConfig): ChatProvider {
     supportsThinking: false,
 
     async *streamChat(request: ChatRequest): AsyncIterable<StreamEvent> {
-      const body = {
+      const body: Record<string, unknown> = {
         model: request.model,
         stream: true,
-        messages: request.messages
-          .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
-          .map((m) => ({ role: m.role, content: m.content })),
+        messages: mapOpenAIMessages(request.messages),
       };
+
+      if (request.tools && request.tools.length > 0) {
+        body.tools = request.tools.map(toOpenAITool);
+        body.tool_choice = "auto";
+      }
 
       let response: Response;
       try {
@@ -75,12 +79,72 @@ export function createOpenAIProvider(config: ProviderConfig): ChatProvider {
   };
 }
 
+function toOpenAITool(def: ToolDefinition): Record<string, unknown> {
+  return {
+    type: "function",
+    function: {
+      name: def.name,
+      description: def.description,
+      parameters: def.inputSchema,
+    },
+  };
+}
+
+function mapOpenAIMessages(messages: ChatMessage[]): unknown[] {
+  const out: unknown[] = [];
+  for (const m of messages) {
+    if (m.role === "system" || m.role === "user") {
+      out.push({ role: m.role, content: m.content });
+      continue;
+    }
+    if (m.role === "assistant") {
+      const activeCalls = (m.toolCalls ?? []).filter((c) => !c.ignored);
+      if (activeCalls.length === 0) {
+        out.push({ role: "assistant", content: m.content || null });
+        continue;
+      }
+      out.push({
+        role: "assistant",
+        content: m.content || null,
+        tool_calls: activeCalls.map((c) => ({
+          id: c.id,
+          type: "function",
+          function: {
+            name: c.name,
+            arguments:
+              typeof c.arguments === "string"
+                ? c.arguments
+                : JSON.stringify(c.arguments),
+          },
+        })),
+      });
+      continue;
+    }
+    if (m.role === "tool") {
+      out.push({
+        role: "tool",
+        tool_call_id: m.toolCallId,
+        content: m.content,
+      });
+    }
+  }
+  return out;
+}
+
+interface PendingToolCall {
+  id: string;
+  name: string;
+  args: string;
+  started: boolean;
+}
+
 async function* parseOpenAISSE(
   body: ReadableStream<Uint8Array>,
 ): AsyncIterable<StreamEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const pending = new Map<number, PendingToolCall>();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -95,7 +159,10 @@ async function* parseOpenAISSE(
       if (!line || line.startsWith(":")) continue;
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
-      if (data === "[DONE]") return;
+      if (data === "[DONE]") {
+        yield* flushPendingToolCalls(pending);
+        return;
+      }
 
       let json: unknown;
       try {
@@ -104,15 +171,117 @@ async function* parseOpenAISSE(
         continue;
       }
 
-      const delta = (json as {
-        choices?: Array<{ delta?: { content?: string | null } }>;
-      }).choices?.[0]?.delta;
+      const delta = (
+        json as {
+          choices?: Array<{
+            delta?: {
+              content?: string | null;
+              tool_calls?: Array<{
+                index?: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+          }>;
+        }
+      ).choices?.[0]?.delta;
 
       const text = delta?.content;
       if (typeof text === "string" && text.length > 0) {
         yield { type: "text_delta", text };
       }
+
+      if (delta?.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const index = tc.index ?? 0;
+          let cur = pending.get(index);
+          if (!cur) {
+            cur = {
+              id: tc.id || `call_${index}`,
+              name: tc.function?.name || "",
+              args: "",
+              started: false,
+            };
+            pending.set(index, cur);
+          }
+          if (tc.id) cur.id = tc.id;
+          if (tc.function?.name) cur.name = tc.function.name;
+          if (typeof tc.function?.arguments === "string") {
+            cur.args += tc.function.arguments;
+            if (!cur.started && cur.name) {
+              cur.started = true;
+              yield {
+                type: "tool_call_start",
+                id: cur.id,
+                name: cur.name,
+              };
+            }
+            if (cur.started) {
+              yield {
+                type: "tool_call_args_delta",
+                id: cur.id,
+                delta: tc.function.arguments,
+              };
+            }
+          } else if (!cur.started && cur.name) {
+            cur.started = true;
+            yield {
+              type: "tool_call_start",
+              id: cur.id,
+              name: cur.name,
+            };
+          }
+        }
+      }
     }
+  }
+
+  yield* flushPendingToolCalls(pending);
+}
+
+function* flushPendingToolCalls(
+  pending: Map<number, PendingToolCall>,
+): Generator<StreamEvent> {
+  const sorted = [...pending.entries()].sort((a, b) => a[0] - b[0]);
+  for (const [, cur] of sorted) {
+    if (!cur.started && cur.name) {
+      yield { type: "tool_call_start", id: cur.id, name: cur.name };
+    }
+    yield finalizeToolCall(cur.id, cur.name, cur.args);
+  }
+  pending.clear();
+}
+
+function finalizeToolCall(
+  id: string,
+  name: string,
+  rawArgs: string,
+): StreamEvent {
+  try {
+    const parsed = rawArgs.trim() ? JSON.parse(rawArgs) : {};
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {
+        type: "tool_call_end",
+        id,
+        name,
+        arguments: rawArgs,
+        parseError: "工具参数必须是 JSON 对象",
+      };
+    }
+    return {
+      type: "tool_call_end",
+      id,
+      name,
+      arguments: parsed as Record<string, unknown>,
+    };
+  } catch (err) {
+    return {
+      type: "tool_call_end",
+      id,
+      name,
+      arguments: rawArgs,
+      parseError: `参数 JSON 解析失败：${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 }
 

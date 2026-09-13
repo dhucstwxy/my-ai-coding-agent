@@ -84,6 +84,10 @@ export class SessionStore {
         role: m.role,
         content: m.content,
         ...(m.thinkingSummary ? { thinkingSummary: m.thinkingSummary } : {}),
+        ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}),
+        ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
+        ...(m.toolName ? { toolName: m.toolName } : {}),
+        ...(m.isError !== undefined ? { isError: m.isError } : {}),
         createdAt: m.createdAt,
       })),
     };

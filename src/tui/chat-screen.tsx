@@ -27,6 +27,7 @@ export function ChatScreen({
   const [input, setInput] = useState("");
   const [streamingText, setStreamingText] = useState<string | undefined>();
   const [thinkingLabel, setThinkingLabel] = useState<string | undefined>();
+  const [toolStatus, setToolStatus] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
@@ -58,8 +59,8 @@ export function ChatScreen({
     setInput("");
     setStreamingText("");
     setThinkingLabel(undefined);
+    setToolStatus(undefined);
 
-    // 乐观显示用户消息（store 内已由 ChatService 写入）
     const optimisticUser: ChatMessage = {
       id: `local-user-${Date.now()}`,
       role: "user",
@@ -85,6 +86,34 @@ export function ChatScreen({
         if (event.type === "thinking_end") {
           setThinkingLabel(`思考摘要：${event.summary}`);
         }
+        if (event.type === "tool_call_start") {
+          setToolStatus(`准备调用工具：${event.name}`);
+        }
+        if (event.type === "tool_execution_start") {
+          setToolStatus(
+            `正在执行 ${event.name}… 参数：${event.argsSummary}`,
+          );
+          // 刷新已落盘的 assistant(toolCalls)
+          const mid = store.get(sessionId);
+          setMessages(mid?.messages ?? []);
+          acc = "";
+          setStreamingText(undefined);
+        }
+        if (event.type === "tool_execution_end") {
+          setToolStatus(
+            `${event.ok ? "成功" : "失败"} ${event.name}：${event.resultSummary}`,
+          );
+          const mid = store.get(sessionId);
+          setMessages(mid?.messages ?? []);
+          // 准备接收二次文本
+          acc = "";
+          setStreamingText("");
+        }
+        if (event.type === "tool_calls_ignored") {
+          setToolStatus(
+            `已忽略后续工具：${event.names.join(", ")}（本轮只执行第一个）`,
+          );
+        }
         if (event.type === "text_delta") {
           acc += event.text;
           setStreamingText(acc);
@@ -93,7 +122,7 @@ export function ChatScreen({
           setError(event.message);
           setStreamingText(undefined);
           setThinkingLabel(undefined);
-          // 刷新为落盘状态（仅 user，无失败助手）
+          setToolStatus(undefined);
           const latest = store.get(sessionId);
           setMessages(latest?.messages ?? []);
           break;
@@ -103,11 +132,13 @@ export function ChatScreen({
           setMessages(latest?.messages ?? []);
           setStreamingText(undefined);
           setThinkingLabel(undefined);
+          setToolStatus(undefined);
         }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setStreamingText(undefined);
+      setToolStatus(undefined);
     } finally {
       setBusy(false);
     }
@@ -131,13 +162,14 @@ export function ChatScreen({
           messages={messages}
           streamingText={streamingText}
           thinkingLabel={thinkingLabel}
+          toolStatus={toolStatus}
         />
       </Box>
 
       {error ? <Text color="red">错误：{error}</Text> : null}
 
       <Box>
-        <Text color="cyan">{busy ? "发送中" : "输入"}&gt; </Text>
+        <Text color="cyan">{busy ? "处理中" : "输入"}&gt; </Text>
         <Text>{input}</Text>
         {!busy ? <Text dimColor>█</Text> : null}
       </Box>

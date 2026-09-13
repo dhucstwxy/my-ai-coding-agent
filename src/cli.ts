@@ -3,6 +3,7 @@ import { ConfigError } from "./config/validate.js";
 import { createProvider } from "./provider/factory.js";
 import { SessionStore } from "./session/store.js";
 import { ChatService } from "./chat/service.js";
+import { createDefaultRegistry } from "./tools/create-registry.js";
 import { startApp } from "./tui/index.js";
 
 /** 组装依赖并启动 TUI */
@@ -33,11 +34,20 @@ export async function runCli(): Promise<void> {
 
   const provider = createProvider(active);
   const store = new SessionStore();
-  const chat = new ChatService(store, provider, active);
+  const workspaceRoot = process.cwd();
+  const registry = createDefaultRegistry();
+  const chat = new ChatService(
+    store,
+    provider,
+    active,
+    registry,
+    workspaceRoot,
+  );
 
   console.log(
     `已加载配置（${loaded.source}），供应商：${active.name} / ${active.protocol} / ${active.model}`,
   );
+  console.log(`工作区：${workspaceRoot}`);
 
   startApp({ store, chat, warnings: loaded.warnings });
 }

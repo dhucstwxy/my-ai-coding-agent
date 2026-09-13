@@ -1,4 +1,6 @@
 import type { ProviderConfig } from "../config/types.js";
+import type { ChatMessage } from "../session/types.js";
+import type { ToolDefinition } from "../tools/types.js";
 import type { ChatProvider, ChatRequest, StreamEvent } from "./types.js";
 
 function normalizeAnthropicBaseUrl(baseUrl: string): string {
@@ -31,21 +33,21 @@ export function createAnthropicProvider(config: ProviderConfig): ChatProvider {
       const systemParts = request.messages
         .filter((m) => m.role === "system")
         .map((m) => m.content);
-      const messages = request.messages
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({ role: m.role, content: m.content }));
 
       const body: Record<string, unknown> = {
         model: request.model,
         max_tokens: 8192,
         stream: true,
-        messages,
+        messages: mapAnthropicMessages(request.messages),
       };
       if (systemParts.length > 0) {
         body.system = systemParts.join("\n\n");
       }
       if (request.thinking) {
         body.thinking = { type: "enabled", budget_tokens: 8000 };
+      }
+      if (request.tools && request.tools.length > 0) {
+        body.tools = request.tools.map(toAnthropicTool);
       }
 
       let response: Response;
@@ -96,6 +98,90 @@ export function createAnthropicProvider(config: ProviderConfig): ChatProvider {
   };
 }
 
+function toAnthropicTool(def: ToolDefinition): Record<string, unknown> {
+  return {
+    name: def.name,
+    description: def.description,
+    input_schema: def.inputSchema,
+  };
+}
+
+function mapAnthropicMessages(messages: ChatMessage[]): unknown[] {
+  const out: unknown[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === "system") continue;
+
+    if (m.role === "user") {
+      out.push({ role: "user", content: m.content });
+      continue;
+    }
+
+    if (m.role === "assistant") {
+      const activeCalls = (m.toolCalls ?? []).filter((c) => !c.ignored);
+      const content: unknown[] = [];
+      if (m.content && m.content.length > 0) {
+        content.push({ type: "text", text: m.content });
+      }
+      for (const c of activeCalls) {
+        const input =
+          typeof c.arguments === "string"
+            ? safeParseObject(c.arguments)
+            : c.arguments;
+        content.push({
+          type: "tool_use",
+          id: c.id,
+          name: c.name,
+          input,
+        });
+      }
+      out.push({
+        role: "assistant",
+        content: content.length > 0 ? content : m.content || "",
+      });
+      continue;
+    }
+
+    if (m.role === "tool") {
+      // 合并连续的 tool 结果为一条 user 消息
+      const results: unknown[] = [
+        {
+          type: "tool_result",
+          tool_use_id: m.toolCallId,
+          content: m.content,
+          ...(m.isError ? { is_error: true } : {}),
+        },
+      ];
+      while (i + 1 < messages.length && messages[i + 1].role === "tool") {
+        i += 1;
+        const next = messages[i];
+        results.push({
+          type: "tool_result",
+          tool_use_id: next.toolCallId,
+          content: next.content,
+          ...(next.isError ? { is_error: true } : {}),
+        });
+      }
+      out.push({ role: "user", content: results });
+    }
+  }
+
+  return out;
+}
+
+function safeParseObject(raw: string): Record<string, unknown> {
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      return v as Record<string, unknown>;
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
 async function* parseAnthropicSSE(
   body: ReadableStream<Uint8Array>,
 ): AsyncIterable<StreamEvent> {
@@ -104,6 +190,11 @@ async function* parseAnthropicSSE(
   let buffer = "";
   let thinkingStarted = false;
   let thinkingBuffer = "";
+
+  let toolId = "";
+  let toolName = "";
+  let toolArgs = "";
+  let inTool = false;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -132,8 +223,17 @@ async function* parseAnthropicSSE(
 
       const obj = json as {
         type?: string;
-        delta?: { type?: string; text?: string; thinking?: string };
-        content_block?: { type?: string };
+        delta?: {
+          type?: string;
+          text?: string;
+          thinking?: string;
+          partial_json?: string;
+        };
+        content_block?: {
+          type?: string;
+          id?: string;
+          name?: string;
+        };
       };
 
       const type = eventName || obj.type || "";
@@ -143,6 +243,17 @@ async function* parseAnthropicSSE(
           thinkingStarted = true;
           thinkingBuffer = "";
           yield { type: "thinking_start" };
+        }
+        if (obj.content_block?.type === "tool_use") {
+          inTool = true;
+          toolId = obj.content_block.id || `toolu_${Date.now()}`;
+          toolName = obj.content_block.name || "";
+          toolArgs = "";
+          yield {
+            type: "tool_call_start",
+            id: toolId,
+            name: toolName,
+          };
         }
       }
 
@@ -155,14 +266,35 @@ async function* parseAnthropicSSE(
         if (delta?.type === "text_delta" && typeof delta.text === "string") {
           yield { type: "text_delta", text: delta.text };
         }
+        if (
+          delta?.type === "input_json_delta" &&
+          typeof delta.partial_json === "string" &&
+          inTool
+        ) {
+          toolArgs += delta.partial_json;
+          yield {
+            type: "tool_call_args_delta",
+            id: toolId,
+            delta: delta.partial_json,
+          };
+        }
       }
 
-      if (type === "content_block_stop" && thinkingStarted) {
-        yield {
-          type: "thinking_end",
-          summary: summarizeThinking(thinkingBuffer),
-        };
-        thinkingStarted = false;
+      if (type === "content_block_stop") {
+        if (thinkingStarted) {
+          yield {
+            type: "thinking_end",
+            summary: summarizeThinking(thinkingBuffer),
+          };
+          thinkingStarted = false;
+        }
+        if (inTool) {
+          yield finalizeToolCall(toolId, toolName, toolArgs);
+          inTool = false;
+          toolId = "";
+          toolName = "";
+          toolArgs = "";
+        }
       }
 
       if (type === "error") {
@@ -173,6 +305,39 @@ async function* parseAnthropicSSE(
         return;
       }
     }
+  }
+}
+
+function finalizeToolCall(
+  id: string,
+  name: string,
+  rawArgs: string,
+): StreamEvent {
+  try {
+    const parsed = rawArgs.trim() ? JSON.parse(rawArgs) : {};
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {
+        type: "tool_call_end",
+        id,
+        name,
+        arguments: rawArgs,
+        parseError: "工具参数必须是 JSON 对象",
+      };
+    }
+    return {
+      type: "tool_call_end",
+      id,
+      name,
+      arguments: parsed as Record<string, unknown>,
+    };
+  } catch (err) {
+    return {
+      type: "tool_call_end",
+      id,
+      name,
+      arguments: rawArgs,
+      parseError: `参数 JSON 解析失败：${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 }
 
