@@ -1,0 +1,20 @@
+# MewCode 配置示例（请复制为 config.yaml 并填写真实 api_key）
+# 项目路径：./.mewcode/config.yaml（优先）
+# 用户路径：~/.mewcode/config.yaml
+
+active: deepseek
+
+providers:
+  - name: deepseek
+    protocol: openai
+    model: deepseek-v4-flash
+    base_url: https://api.deepseek.com
+    api_key: YOUR_API_KEY
+    # thinking: true  # openai 协议不支持，开启时会告警并忽略
+
+  # - name: anthropic
+  #   protocol: anthropic
+  #   model: claude-sonnet-4-20250514
+  #   base_url: https://api.anthropic.com
+  #   api_key: YOUR_ANTHROPIC_KEY
+  #   thinking: true
