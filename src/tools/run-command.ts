@@ -4,6 +4,7 @@ import { truncateText } from "./truncate.js";
 
 export const runCommandTool: Tool = {
   name: "run_command",
+  sideEffect: true,
   description:
     "在工作区根目录下执行 shell 命令，返回标准输出、标准错误与退出码。超时会被中止。",
   inputSchema: {

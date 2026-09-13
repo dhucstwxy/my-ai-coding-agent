@@ -9,6 +9,7 @@ const MAX_LINE_LEN = 200;
 
 export const grepSearchTool: Tool = {
   name: "grep_search",
+  sideEffect: false,
   description:
     "在工作区内按正则或字面文本搜索文件内容，返回匹配的文件路径、行号与片段。",
   inputSchema: {

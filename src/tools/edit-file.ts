@@ -4,6 +4,7 @@ import { resolveInWorkspace } from "./workspace.js";
 
 export const editFileTool: Tool = {
   name: "edit_file",
+  sideEffect: true,
   description:
     "对工作区内已有文件做原文唯一匹配替换：old_text 必须在文件中恰好出现一次，否则返回错误且不改写文件。",
   inputSchema: {

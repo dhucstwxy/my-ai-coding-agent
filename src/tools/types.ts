@@ -25,5 +25,7 @@ export interface Tool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** true = 有副作用，调度时必须串行 */
+  sideEffect: boolean;
   execute(args: unknown, ctx: ToolContext): Promise<ToolResult>;
 }

@@ -5,6 +5,7 @@ import { resolveInWorkspace } from "./workspace.js";
 
 export const writeFileTool: Tool = {
   name: "write_file",
+  sideEffect: true,
   description:
     "在工作区内创建或覆盖写入文本文件。必要时自动创建中间目录。",
   inputSchema: {

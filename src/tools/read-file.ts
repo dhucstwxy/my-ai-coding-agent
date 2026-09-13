@@ -5,6 +5,7 @@ import { resolveInWorkspace } from "./workspace.js";
 
 export const readFileTool: Tool = {
   name: "read_file",
+  sideEffect: false,
   description:
     "读取工作区内指定路径的文本文件内容。路径相对工作区根目录或为工作区内的绝对路径。",
   inputSchema: {

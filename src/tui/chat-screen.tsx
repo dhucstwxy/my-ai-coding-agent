@@ -28,11 +28,20 @@ export function ChatScreen({
   const [streamingText, setStreamingText] = useState<string | undefined>();
   const [thinkingLabel, setThinkingLabel] = useState<string | undefined>();
   const [toolStatus, setToolStatus] = useState<string | undefined>();
+  const [progress, setProgress] = useState<string | undefined>();
+  const [stopMessage, setStopMessage] = useState<string | undefined>();
+  const [modeLabel, setModeLabel] = useState(
+    chat.getMode(sessionId) === "plan" ? "计划模式" : "执行模式",
+  );
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
   useInput((char, key) => {
     if (key.escape) {
+      if (busy) {
+        chat.cancelCurrent();
+        return;
+      }
       onBack();
       return;
     }
@@ -60,6 +69,8 @@ export function ChatScreen({
     setStreamingText("");
     setThinkingLabel(undefined);
     setToolStatus(undefined);
+    setProgress(undefined);
+    setStopMessage(undefined);
 
     const optimisticUser: ChatMessage = {
       id: `local-user-${Date.now()}`,
@@ -74,6 +85,17 @@ export function ChatScreen({
 
     try {
       for await (const event of chat.send(sessionId, text)) {
+        if (event.type === "mode_changed") {
+          setModeLabel(event.mode === "plan" ? "计划模式" : "执行模式");
+        }
+        if (event.type === "agent_progress") {
+          setProgress(`迭代 ${event.iteration}/${event.maxIterations}`);
+          acc = "";
+          setStreamingText("");
+        }
+        if (event.type === "agent_stopped") {
+          setStopMessage(event.message);
+        }
         if (event.type === "thinking_start") {
           setThinkingLabel("思考中…");
         }
@@ -93,7 +115,6 @@ export function ChatScreen({
           setToolStatus(
             `正在执行 ${event.name}… 参数：${event.argsSummary}`,
           );
-          // 刷新已落盘的 assistant(toolCalls)
           const mid = store.get(sessionId);
           setMessages(mid?.messages ?? []);
           acc = "";
@@ -105,14 +126,8 @@ export function ChatScreen({
           );
           const mid = store.get(sessionId);
           setMessages(mid?.messages ?? []);
-          // 准备接收二次文本
           acc = "";
           setStreamingText("");
-        }
-        if (event.type === "tool_calls_ignored") {
-          setToolStatus(
-            `已忽略后续工具：${event.names.join(", ")}（本轮只执行第一个）`,
-          );
         }
         if (event.type === "text_delta") {
           acc += event.text;
@@ -125,7 +140,6 @@ export function ChatScreen({
           setToolStatus(undefined);
           const latest = store.get(sessionId);
           setMessages(latest?.messages ?? []);
-          break;
         }
         if (event.type === "done") {
           const latest = store.get(sessionId);
@@ -133,6 +147,7 @@ export function ChatScreen({
           setStreamingText(undefined);
           setThinkingLabel(undefined);
           setToolStatus(undefined);
+          setProgress(undefined);
         }
       }
     } catch (err) {
@@ -148,8 +163,15 @@ export function ChatScreen({
 
   return (
     <Box flexDirection="column">
-      <Text bold>MewCode — {title}</Text>
-      <Text dimColor>Enter 发送，Esc 返回会话列表</Text>
+      <Text bold>
+        MewCode — {title}{" "}
+        <Text color="magenta">[{modeLabel}]</Text>
+      </Text>
+      <Text dimColor>
+        Enter 发送；忙碌时 Esc 取消任务；空闲 Esc 返回列表；/plan /do 切换模式
+      </Text>
+      {progress ? <Text color="blue">{progress}</Text> : null}
+      {stopMessage ? <Text color="green">状态：{stopMessage}</Text> : null}
 
       {warnings.map((w) => (
         <Text key={w} color="yellow">
