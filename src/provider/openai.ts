@@ -24,7 +24,8 @@ export function createOpenAIProvider(config: ProviderConfig): ChatProvider {
       const body: Record<string, unknown> = {
         model: request.model,
         stream: true,
-        messages: mapOpenAIMessages(request.messages),
+        stream_options: { include_usage: true },
+        messages: mapOpenAIMessages(request.messages, request.system),
       };
 
       if (request.tools && request.tools.length > 0) {
@@ -90,8 +91,14 @@ function toOpenAITool(def: ToolDefinition): Record<string, unknown> {
   };
 }
 
-function mapOpenAIMessages(messages: ChatMessage[]): unknown[] {
+function mapOpenAIMessages(
+  messages: ChatMessage[],
+  stableSystem?: string,
+): unknown[] {
   const out: unknown[] = [];
+  if (stableSystem && stableSystem.length > 0) {
+    out.push({ role: "system", content: stableSystem });
+  }
   for (const m of messages) {
     if (m.role === "system" || m.role === "user") {
       out.push({ role: m.role, content: m.content });
@@ -145,6 +152,7 @@ async function* parseOpenAISSE(
   const decoder = new TextDecoder();
   let buffer = "";
   const pending = new Map<number, PendingToolCall>();
+  let lastUsage: Extract<StreamEvent, { type: "token_usage" }> | undefined;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -161,6 +169,7 @@ async function* parseOpenAISSE(
       const data = line.slice(5).trim();
       if (data === "[DONE]") {
         yield* flushPendingToolCalls(pending);
+        yield lastUsage ?? { type: "token_usage", cacheAvailable: false };
         return;
       }
 
@@ -170,6 +179,9 @@ async function* parseOpenAISSE(
       } catch {
         continue;
       }
+
+      const parsedUsage = parseOpenAIUsage(json);
+      if (parsedUsage) lastUsage = parsedUsage;
 
       const delta = (
         json as {
@@ -237,6 +249,34 @@ async function* parseOpenAISSE(
   }
 
   yield* flushPendingToolCalls(pending);
+  yield lastUsage ?? { type: "token_usage", cacheAvailable: false };
+}
+
+function parseOpenAIUsage(
+  json: unknown,
+): Extract<StreamEvent, { type: "token_usage" }> | undefined {
+  const usage = (
+    json as {
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        prompt_cache_hit_tokens?: number;
+        prompt_cache_miss_tokens?: number;
+      };
+    }
+  ).usage;
+  if (!usage) return undefined;
+  const hasCache =
+    typeof usage.prompt_cache_hit_tokens === "number" ||
+    typeof usage.prompt_cache_miss_tokens === "number";
+  return {
+    type: "token_usage",
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    cacheHitTokens: usage.prompt_cache_hit_tokens,
+    cacheMissTokens: usage.prompt_cache_miss_tokens,
+    cacheAvailable: hasCache,
+  };
 }
 
 function* flushPendingToolCalls(

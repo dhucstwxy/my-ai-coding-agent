@@ -7,7 +7,7 @@ export const readFileTool: Tool = {
   name: "read_file",
   sideEffect: false,
   description:
-    "读取工作区内指定路径的文本文件内容。路径相对工作区根目录或为工作区内的绝对路径。",
+    "读取工作区内指定路径的文本文件内容。路径相对工作区根目录或为工作区内的绝对路径。优先使用本专用工具读文件，不要用 run_command 代替。编辑或覆盖文件前必须先用本工具读取当前内容。",
   inputSchema: {
     type: "object",
     properties: {

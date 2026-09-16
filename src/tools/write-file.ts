@@ -7,7 +7,7 @@ export const writeFileTool: Tool = {
   name: "write_file",
   sideEffect: true,
   description:
-    "在工作区内创建或覆盖写入文本文件。必要时自动创建中间目录。",
+    "在工作区内创建或覆盖写入文本文件。必要时自动创建中间目录。优先使用本专用工具写文件，不要用 shell 重定向代替。覆盖已有文件前必须先 read_file。",
   inputSchema: {
     type: "object",
     properties: {

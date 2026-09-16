@@ -33,6 +33,7 @@ export function ChatScreen({
   const [modeLabel, setModeLabel] = useState(
     chat.getMode(sessionId) === "plan" ? "计划模式" : "执行模式",
   );
+  const [cacheLine, setCacheLine] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
@@ -71,6 +72,7 @@ export function ChatScreen({
     setToolStatus(undefined);
     setProgress(undefined);
     setStopMessage(undefined);
+    setCacheLine(undefined);
 
     const optimisticUser: ChatMessage = {
       id: `local-user-${Date.now()}`,
@@ -87,6 +89,15 @@ export function ChatScreen({
       for await (const event of chat.send(sessionId, text)) {
         if (event.type === "mode_changed") {
           setModeLabel(event.mode === "plan" ? "计划模式" : "执行模式");
+        }
+        if (event.type === "token_usage") {
+          if (!event.cacheAvailable) {
+            setCacheLine("缓存：不可用（协议未返回命中字段）");
+          } else {
+            setCacheLine(
+              `缓存：命中 ${event.cacheHitTokens ?? 0} / 未命中 ${event.cacheMissTokens ?? 0}`,
+            );
+          }
         }
         if (event.type === "agent_progress") {
           setProgress(`迭代 ${event.iteration}/${event.maxIterations}`);
@@ -171,6 +182,7 @@ export function ChatScreen({
         Enter 发送；忙碌时 Esc 取消任务；空闲 Esc 返回列表；/plan /do 切换模式
       </Text>
       {progress ? <Text color="blue">{progress}</Text> : null}
+      {cacheLine ? <Text dimColor>{cacheLine}</Text> : null}
       {stopMessage ? <Text color="green">状态：{stopMessage}</Text> : null}
 
       {warnings.map((w) => (

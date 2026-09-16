@@ -33,6 +33,10 @@ export function createAnthropicProvider(config: ProviderConfig): ChatProvider {
       const systemParts = request.messages
         .filter((m) => m.role === "system")
         .map((m) => m.content);
+      const stable =
+        request.system && request.system.length > 0
+          ? request.system
+          : systemParts.join("\n\n");
 
       const body: Record<string, unknown> = {
         model: request.model,
@@ -40,14 +44,27 @@ export function createAnthropicProvider(config: ProviderConfig): ChatProvider {
         stream: true,
         messages: mapAnthropicMessages(request.messages),
       };
-      if (systemParts.length > 0) {
-        body.system = systemParts.join("\n\n");
+      if (stable) {
+        body.system = [
+          {
+            type: "text",
+            text: stable,
+            cache_control: { type: "ephemeral" },
+          },
+        ];
       }
       if (request.thinking) {
         body.thinking = { type: "enabled", budget_tokens: 8000 };
       }
       if (request.tools && request.tools.length > 0) {
-        body.tools = request.tools.map(toAnthropicTool);
+        const mapped = request.tools.map(toAnthropicTool);
+        if (request.cacheTools !== false && mapped.length > 0) {
+          mapped[mapped.length - 1] = {
+            ...mapped[mapped.length - 1],
+            cache_control: { type: "ephemeral" },
+          };
+        }
+        body.tools = mapped;
       }
 
       let response: Response;
@@ -58,6 +75,7 @@ export function createAnthropicProvider(config: ProviderConfig): ChatProvider {
             "Content-Type": "application/json",
             "x-api-key": config.apiKey,
             "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31",
           },
           body: JSON.stringify(body),
         });
@@ -195,6 +213,7 @@ async function* parseAnthropicSSE(
   let toolName = "";
   let toolArgs = "";
   let inTool = false;
+  let lastUsage: Extract<StreamEvent, { type: "token_usage" }> | undefined;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -234,7 +253,12 @@ async function* parseAnthropicSSE(
           id?: string;
           name?: string;
         };
+        usage?: AnthropicUsage;
+        message?: { usage?: AnthropicUsage };
       };
+
+      const parsedUsage = parseAnthropicUsage(obj.usage ?? obj.message?.usage);
+      if (parsedUsage) lastUsage = parsedUsage;
 
       const type = eventName || obj.type || "";
 
@@ -306,6 +330,32 @@ async function* parseAnthropicSSE(
       }
     }
   }
+
+  yield lastUsage ?? { type: "token_usage", cacheAvailable: false };
+}
+
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+function parseAnthropicUsage(
+  usage: AnthropicUsage | undefined,
+): Extract<StreamEvent, { type: "token_usage" }> | undefined {
+  if (!usage) return undefined;
+  const hasCache =
+    typeof usage.cache_read_input_tokens === "number" ||
+    typeof usage.cache_creation_input_tokens === "number";
+  return {
+    type: "token_usage",
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheHitTokens: usage.cache_read_input_tokens,
+    cacheMissTokens: usage.cache_creation_input_tokens,
+    cacheAvailable: hasCache,
+  };
 }
 
 function finalizeToolCall(

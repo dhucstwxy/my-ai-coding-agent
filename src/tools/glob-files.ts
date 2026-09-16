@@ -10,7 +10,7 @@ export const globFilesTool: Tool = {
   name: "glob_files",
   sideEffect: false,
   description:
-    "在工作区内按 glob 模式查找文件路径（支持 * 与 **）。返回相对工作区根的路径列表。",
+    "在工作区内按 glob 模式查找文件路径（支持 * 与 **）。返回相对工作区根的路径列表。优先使用本专用工具找文件，不要用 find/dir/ls 代替。",
   inputSchema: {
     type: "object",
     properties: {

@@ -29,6 +29,15 @@ export type StreamEvent =
       resultSummary: string;
     }
   | { type: "tool_calls_ignored"; names: string[] }
+  | {
+      type: "token_usage";
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheHitTokens?: number;
+      cacheMissTokens?: number;
+      /** false 表示协议未返回缓存字段，禁止伪造 */
+      cacheAvailable: boolean;
+    }
   | { type: "error"; message: string }
   | { type: "done" };
 
@@ -38,6 +47,10 @@ export interface ChatRequest {
   thinking?: boolean;
   /** 缺省或空 = 不提供工具 */
   tools?: ToolDefinition[];
+  /** 稳定系统提示（可缓存前缀）；优先于 messages 中的 system */
+  system?: string;
+  /** Anthropic 是否在 tools 上打缓存标记，默认 true */
+  cacheTools?: boolean;
 }
 
 export interface ChatProvider {

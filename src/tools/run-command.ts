@@ -6,7 +6,7 @@ export const runCommandTool: Tool = {
   name: "run_command",
   sideEffect: true,
   description:
-    "在工作区根目录下执行 shell 命令，返回标准输出、标准错误与退出码。超时会被中止。",
+    "在工作区根目录下执行 shell 命令，返回标准输出、标准错误与退出码。超时会被中止。仅用于构建、测试、git 等确需 shell 的操作；读文件、搜代码、找文件请用专用工具，不要用本工具代替。",
   inputSchema: {
     type: "object",
     properties: {

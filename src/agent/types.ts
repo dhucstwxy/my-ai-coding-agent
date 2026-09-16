@@ -12,9 +12,16 @@ export type StopReason =
 export type AgentEvent =
   | StreamEvent
   | { type: "agent_progress"; iteration: number; maxIterations: number }
-  | { type: "token_usage"; inputTokens?: number; outputTokens?: number }
   | { type: "agent_stopped"; reason: StopReason; message: string }
   | { type: "mode_changed"; mode: AgentMode };
+
+export interface TokenUsageInfo {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheHitTokens?: number;
+  cacheMissTokens?: number;
+  cacheAvailable: boolean;
+}
 
 export interface CollectedToolCall {
   id: string;
@@ -27,7 +34,7 @@ export interface CollectedTurn {
   text: string;
   toolCalls: CollectedToolCall[];
   thinkingSummary?: string;
-  usage?: { inputTokens?: number; outputTokens?: number };
+  usage?: TokenUsageInfo;
   errorMessage?: string;
 }
 

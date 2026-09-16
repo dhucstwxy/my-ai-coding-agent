@@ -1,5 +1,10 @@
 import type { StreamEvent } from "../provider/types.js";
-import type { AgentEvent, CollectedToolCall, CollectedTurn } from "./types.js";
+import type {
+  AgentEvent,
+  CollectedToolCall,
+  CollectedTurn,
+  TokenUsageInfo,
+} from "./types.js";
 
 /**
  * 双路收集：边 yield 事件给调用方，结束时 return CollectedTurn。
@@ -12,6 +17,7 @@ export async function* collectStream(
   let thinkingBuf = "";
   const toolCalls: CollectedToolCall[] = [];
   let errorMessage: string | undefined;
+  let usage: TokenUsageInfo | undefined;
 
   for await (const event of stream) {
     if (event.type === "text_delta") {
@@ -31,10 +37,26 @@ export async function* collectStream(
         ...(event.parseError ? { parseError: event.parseError } : {}),
       });
     }
+    if (event.type === "token_usage") {
+      usage = {
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        cacheHitTokens: event.cacheHitTokens,
+        cacheMissTokens: event.cacheMissTokens,
+        cacheAvailable: event.cacheAvailable,
+      };
+    }
     if (event.type === "error") {
       errorMessage = event.message;
       yield event;
-      return buildTurn(text, toolCalls, thinkingSummary, thinkingBuf, errorMessage);
+      return buildTurn(
+        text,
+        toolCalls,
+        thinkingSummary,
+        thinkingBuf,
+        errorMessage,
+        usage,
+      );
     }
     if (event.type === "done") {
       break;
@@ -42,7 +64,14 @@ export async function* collectStream(
     yield event;
   }
 
-  return buildTurn(text, toolCalls, thinkingSummary, thinkingBuf, errorMessage);
+  return buildTurn(
+    text,
+    toolCalls,
+    thinkingSummary,
+    thinkingBuf,
+    errorMessage,
+    usage,
+  );
 }
 
 function buildTurn(
@@ -51,6 +80,7 @@ function buildTurn(
   thinkingSummary: string | undefined,
   thinkingBuf: string,
   errorMessage?: string,
+  usage?: TokenUsageInfo,
 ): CollectedTurn {
   return {
     text,
@@ -61,5 +91,6 @@ function buildTurn(
         ? thinkingBuf.replace(/\s+/g, " ").trim().slice(0, 80)
         : undefined),
     errorMessage,
+    usage,
   };
 }

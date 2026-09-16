@@ -6,7 +6,7 @@ export const editFileTool: Tool = {
   name: "edit_file",
   sideEffect: true,
   description:
-    "对工作区内已有文件做原文唯一匹配替换：old_text 必须在文件中恰好出现一次，否则返回错误且不改写文件。",
+    "对工作区内已有文件做原文唯一匹配替换：old_text 必须在文件中恰好出现一次，否则返回错误且不改写文件。编辑前必须先 read_file。优先使用本专用工具改文件，不要用 sed/脚本代替。",
   inputSchema: {
     type: "object",
     properties: {

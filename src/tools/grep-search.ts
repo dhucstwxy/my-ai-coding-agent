@@ -11,7 +11,7 @@ export const grepSearchTool: Tool = {
   name: "grep_search",
   sideEffect: false,
   description:
-    "在工作区内按正则或字面文本搜索文件内容，返回匹配的文件路径、行号与片段。",
+    "在工作区内按正则或字面文本搜索文件内容，返回匹配的文件路径、行号与片段。优先使用本专用工具搜代码，不要用 grep/findstr/run_command 代替。",
   inputSchema: {
     type: "object",
     properties: {

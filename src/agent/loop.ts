@@ -2,8 +2,14 @@ import { randomUUID } from "node:crypto";
 import type { ProviderConfig } from "../config/types.js";
 import type { ChatProvider } from "../provider/types.js";
 import type { SessionStore } from "../session/store.js";
-import type { ToolCallRecord } from "../session/types.js";
+import type { ChatMessage, ToolCallRecord } from "../session/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
+import {
+  DEFAULT_REINFORCE_EVERY,
+  buildPrompt,
+  buildReminders,
+  formatTimeLabel,
+} from "../prompt/index.js";
 import type { CancelToken } from "./cancel.js";
 import { collectStream } from "./collector.js";
 import { filterToolsForMode } from "./plan-mode.js";
@@ -63,11 +69,45 @@ export class AgentLoop {
 
       const tools = filterToolsForMode(this.registry, opts.mode);
 
+      let stableSystem: string;
+      let reminderMessages: ChatMessage[];
+      try {
+        const built = buildPrompt({
+          workspaceRoot: this.workspaceRoot,
+          now: new Date(),
+          platform: process.platform,
+        });
+        stableSystem = built.stableSystem;
+        reminderMessages = buildReminders({
+          mode: opts.mode,
+          iteration,
+          reinforceEvery: DEFAULT_REINFORCE_EVERY,
+          environment: {
+            workspaceRoot: this.workspaceRoot,
+            timeLabel: formatTimeLabel(new Date()),
+            platform: process.platform,
+          },
+        }).map((r) => ({
+          id: randomUUID(),
+          role: "user" as const,
+          content: r.content,
+          createdAt: new Date().toISOString(),
+        }));
+      } catch (err) {
+        yield* this.stop(
+          sessionId,
+          "error",
+          `系统提示拼装失败：${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+
       let turn;
       try {
         const collector = collectStream(
           this.provider.streamChat({
-            messages: session.messages,
+            system: stableSystem,
+            messages: [...reminderMessages, ...session.messages],
             model: this.providerConfig.model,
             thinking,
             tools,
@@ -86,14 +126,6 @@ export class AgentLoop {
           `模型请求失败：${err instanceof Error ? err.message : String(err)}`,
         );
         return;
-      }
-
-      if (turn.usage) {
-        yield {
-          type: "token_usage",
-          inputTokens: turn.usage.inputTokens,
-          outputTokens: turn.usage.outputTokens,
-        };
       }
 
       if (turn.errorMessage) {
