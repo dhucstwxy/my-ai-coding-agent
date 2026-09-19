@@ -1,4 +1,4 @@
-import type { StreamEvent } from "../provider/types.js";
+import type { PermissionGate } from "../permission/gate.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext, ToolResult } from "../tools/types.js";
 import type { CancelToken } from "./cancel.js";
@@ -20,12 +20,15 @@ export interface SchedulerResult {
 
 /**
  * 只读并发，副作用串行；未知工具不执行，返回结构化失败。
+ * 已知工具在 execute 之前先过权限闸门。
  */
 export async function* executeToolBatch(
   calls: CollectedToolCall[],
   registry: ToolRegistry,
   ctx: ToolContext,
   cancel: CancelToken,
+  gate: PermissionGate,
+  sessionId: string,
 ): AsyncGenerator<AgentEvent, SchedulerResult> {
   const readonlyCalls: CollectedToolCall[] = [];
   const sideEffectCalls: CollectedToolCall[] = [];
@@ -44,7 +47,6 @@ export async function* executeToolBatch(
 
   const results: SchedulerResult["results"] = [];
 
-  // 未知：立即产出失败结果事件
   for (const call of unknownCalls) {
     if (cancel.isCancelled) break;
     const result: ToolResult = {
@@ -56,9 +58,21 @@ export async function* executeToolBatch(
     results.push({ call, result, unknown: true });
   }
 
-  // 只读并发
+  const allowedReadonly: CollectedToolCall[] = [];
   if (readonlyCalls.length > 0 && !cancel.isCancelled) {
     for (const call of readonlyCalls) {
+      if (cancel.isCancelled) break;
+      const guarded = yield* guardCall(call, gate, sessionId, cancel);
+      if (guarded) {
+        results.push({ call, result: guarded, unknown: false });
+        continue;
+      }
+      allowedReadonly.push(call);
+    }
+  }
+
+  if (allowedReadonly.length > 0 && !cancel.isCancelled) {
+    for (const call of allowedReadonly) {
       yield {
         type: "tool_execution_start",
         id: call.id,
@@ -68,7 +82,7 @@ export async function* executeToolBatch(
     }
 
     const settled = await Promise.all(
-      readonlyCalls.map(async (call) => {
+      allowedReadonly.map(async (call) => {
         const result = await runOne(call, registry, ctx);
         return { call, result, unknown: false as const };
       }),
@@ -86,9 +100,13 @@ export async function* executeToolBatch(
     }
   }
 
-  // 副作用串行
   for (const call of sideEffectCalls) {
     if (cancel.isCancelled) break;
+    const guarded = yield* guardCall(call, gate, sessionId, cancel);
+    if (guarded) {
+      results.push({ call, result: guarded, unknown: false });
+      continue;
+    }
     yield {
       type: "tool_execution_start",
       id: call.id,
@@ -113,10 +131,50 @@ export async function* executeToolBatch(
   };
 }
 
+/**
+ * 解析失败或权限拒绝时返回失败结果，调用方不得再执行工具。
+ * 通过时返回 null。
+ */
+async function* guardCall(
+  call: CollectedToolCall,
+  gate: PermissionGate,
+  sessionId: string,
+  cancel: CancelToken,
+): AsyncGenerator<AgentEvent, ToolResult | null> {
+  if (call.parseError) {
+    const result: ToolResult = {
+      ok: false,
+      content: call.parseError,
+      errorCode: "parse_error",
+    };
+    yield* emitExecution(call, result);
+    return result;
+  }
+
+  const decision = await gate.check({ sessionId, call, signal: cancel });
+  if (decision.effect === "deny") {
+    const result: ToolResult = {
+      ok: false,
+      content: decision.message,
+      errorCode: decision.reason,
+    };
+    yield {
+      type: "permission_denied",
+      id: call.id,
+      tool: call.name,
+      reason: decision.reason,
+      message: decision.message,
+    };
+    yield* emitExecution(call, result);
+    return result;
+  }
+  return null;
+}
+
 async function* emitExecution(
   call: CollectedToolCall,
   result: ToolResult,
-): AsyncGenerator<StreamEvent> {
+): AsyncGenerator<AgentEvent> {
   yield {
     type: "tool_execution_start",
     id: call.id,

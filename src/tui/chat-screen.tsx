@@ -1,6 +1,8 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
+import type { CancelToken } from "../agent/cancel.js";
 import type { ChatService } from "../chat/service.js";
+import type { PermissionChoice, PermissionMode, PermissionPrompt, PermissionPrompter } from "../permission/types.js";
 import type { SessionStore } from "../session/store.js";
 import type { ChatMessage } from "../session/types.js";
 import { MessageList } from "./message-list.js";
@@ -11,6 +13,49 @@ export interface ChatScreenProps {
   chat: ChatService;
   warnings: string[];
   onBack: () => void;
+}
+
+export interface PromptSession {
+  prompter: PermissionPrompter;
+  isWaiting: () => boolean;
+  choose: (choice: PermissionChoice) => void;
+}
+
+/**
+ * 询问发生在 for-await 暂停期间，由这里直接改界面状态，而不是等事件流。
+ */
+export function createPromptSession(
+  onChange: (prompt: PermissionPrompt | null) => void,
+): PromptSession {
+  let pending: ((choice: PermissionChoice) => void) | null = null;
+
+  return {
+    isWaiting: () => pending !== null,
+    choose(choice) {
+      const resolve = pending;
+      if (!resolve) return;
+      resolve(choice);
+    },
+    prompter: {
+      ask(prompt: PermissionPrompt, signal: CancelToken) {
+        if (signal.isCancelled) return Promise.resolve("deny");
+        onChange(prompt);
+        return new Promise((resolve) => {
+          pending = (choice) => {
+            pending = null;
+            onChange(null);
+            resolve(choice);
+          };
+        });
+      },
+    },
+  };
+}
+
+function shortPermLabel(mode: PermissionMode): string {
+  if (mode === "strict") return "严格";
+  if (mode === "allow") return "放行";
+  return "默认";
 }
 
 export function ChatScreen({
@@ -33,11 +78,53 @@ export function ChatScreen({
   const [modeLabel, setModeLabel] = useState(
     chat.getMode(sessionId) === "plan" ? "计划模式" : "执行模式",
   );
+  const [permLabel, setPermLabel] = useState(
+    shortPermLabel(chat.getPermissionMode(sessionId)),
+  );
+  const [pendingPrompt, setPendingPrompt] = useState<PermissionPrompt | null>(
+    null,
+  );
   const [cacheLine, setCacheLine] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  const promptSessionRef = useRef<PromptSession | null>(null);
+  if (!promptSessionRef.current) {
+    promptSessionRef.current = createPromptSession(setPendingPrompt);
+  }
+
+  useEffect(() => {
+    const session = promptSessionRef.current;
+    if (!session) return;
+    chat.attachPrompter(session.prompter);
+  }, [chat]);
 
   useInput((char, key) => {
+    const promptSession = promptSessionRef.current;
+    if (promptSession?.isWaiting()) {
+      if (key.escape) {
+        chat.cancelCurrent();
+        promptSession.choose("deny");
+        return;
+      }
+      if (char === "1") {
+        promptSession.choose("deny");
+        return;
+      }
+      if (char === "2") {
+        promptSession.choose("once");
+        return;
+      }
+      if (char === "3") {
+        promptSession.choose("session");
+        return;
+      }
+      if (char === "4") {
+        promptSession.choose("permanent");
+        return;
+      }
+      return;
+    }
+
     if (key.escape) {
       if (busy) {
         chat.cancelCurrent();
@@ -89,6 +176,12 @@ export function ChatScreen({
       for await (const event of chat.send(sessionId, text)) {
         if (event.type === "mode_changed") {
           setModeLabel(event.mode === "plan" ? "计划模式" : "执行模式");
+        }
+        if (event.type === "permission_mode_changed") {
+          setPermLabel(shortPermLabel(event.mode));
+        }
+        if (event.type === "permission_denied") {
+          setToolStatus(event.message);
         }
         if (event.type === "token_usage") {
           if (!event.cacheAvailable) {
@@ -176,10 +269,10 @@ export function ChatScreen({
     <Box flexDirection="column">
       <Text bold>
         MewCode — {title}{" "}
-        <Text color="magenta">[{modeLabel}]</Text>
+        <Text color="magenta">[{modeLabel} · 权限{permLabel}]</Text>
       </Text>
       <Text dimColor>
-        Enter 发送；忙碌时 Esc 取消任务；空闲 Esc 返回列表；/plan /do 切换模式
+        Enter 发送；忙碌时 Esc 取消任务；空闲 Esc 返回列表；/plan /do 切换模式；/perm strict|default|allow 切换权限
       </Text>
       {progress ? <Text color="blue">{progress}</Text> : null}
       {cacheLine ? <Text dimColor>{cacheLine}</Text> : null}
@@ -200,12 +293,21 @@ export function ChatScreen({
         />
       </Box>
 
+      {pendingPrompt ? (
+        <Box flexDirection="column">
+          <Text color="yellow">
+            需要确认：{pendingPrompt.tool}　参数：{pendingPrompt.subject}
+          </Text>
+          <Text color="yellow">1 拒绝　2 仅本次　3 本会话　4 永久</Text>
+        </Box>
+      ) : null}
+
       {error ? <Text color="red">错误：{error}</Text> : null}
 
       <Box>
-        <Text color="cyan">{busy ? "处理中" : "输入"}&gt; </Text>
-        <Text>{input}</Text>
-        {!busy ? <Text dimColor>█</Text> : null}
+        <Text color="cyan">{pendingPrompt ? "请选择" : busy ? "处理中" : "输入"}&gt; </Text>
+        <Text>{pendingPrompt ? "" : input}</Text>
+        {!busy && !pendingPrompt ? <Text dimColor>█</Text> : null}
       </Box>
     </Box>
   );

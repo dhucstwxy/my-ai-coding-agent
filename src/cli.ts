@@ -5,6 +5,10 @@ import { SessionStore } from "./session/store.js";
 import { ChatService } from "./chat/service.js";
 import { createDefaultRegistry } from "./tools/create-registry.js";
 import { startApp } from "./tui/index.js";
+import { PermissionGate } from "./permission/gate.js";
+import { loadPermissionRules } from "./permission/load.js";
+import { PermissionModeStore } from "./permission/mode-store.js";
+import { SessionGrantStore } from "./permission/session-grants.js";
 
 /** 组装依赖并启动 TUI */
 export async function runCli(): Promise<void> {
@@ -36,12 +40,23 @@ export async function runCli(): Promise<void> {
   const store = new SessionStore();
   const workspaceRoot = process.cwd();
   const registry = createDefaultRegistry();
+  const ruleSet = loadPermissionRules(workspaceRoot);
+  const permissionModes = new PermissionModeStore();
+  const grants = new SessionGrantStore();
+  const gate = new PermissionGate({
+    rules: ruleSet.rules,
+    modeStore: permissionModes,
+    grants,
+    workspaceRoot,
+  });
   const chat = new ChatService(
     store,
     provider,
     active,
     registry,
     workspaceRoot,
+    gate,
+    permissionModes,
   );
 
   console.log(
@@ -49,5 +64,9 @@ export async function runCli(): Promise<void> {
   );
   console.log(`工作区：${workspaceRoot}`);
 
-  startApp({ store, chat, warnings: loaded.warnings });
+  startApp({
+    store,
+    chat,
+    warnings: [...loaded.warnings, ...ruleSet.warnings],
+  });
 }

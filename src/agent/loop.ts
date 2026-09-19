@@ -13,6 +13,7 @@ import {
 import type { CancelToken } from "./cancel.js";
 import { collectStream } from "./collector.js";
 import { filterToolsForMode } from "./plan-mode.js";
+import type { PermissionGate } from "../permission/gate.js";
 import { executeToolBatch } from "./scheduler.js";
 import type {
   AgentEvent,
@@ -29,6 +30,7 @@ export class AgentLoop {
     private readonly providerConfig: ProviderConfig,
     private readonly registry: ToolRegistry,
     private readonly workspaceRoot: string,
+    private readonly gate: PermissionGate,
     private readonly options: AgentLoopOptions = DEFAULT_AGENT_OPTIONS,
   ) {}
 
@@ -173,6 +175,8 @@ export class AgentLoop {
           timeoutMs: this.options.toolTimeoutMs,
         },
         opts.cancel,
+        this.gate,
+        sessionId,
       );
 
       let schedulerResult = await batch.next();

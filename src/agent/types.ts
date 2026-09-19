@@ -1,3 +1,4 @@
+import type { PermissionDecision, PermissionMode } from "../permission/types.js";
 import type { StreamEvent } from "../provider/types.js";
 
 export type AgentMode = "plan" | "execute";
@@ -13,7 +14,22 @@ export type AgentEvent =
   | StreamEvent
   | { type: "agent_progress"; iteration: number; maxIterations: number }
   | { type: "agent_stopped"; reason: StopReason; message: string }
-  | { type: "mode_changed"; mode: AgentMode };
+  | { type: "mode_changed"; mode: AgentMode }
+  | {
+      type: "permission_prompt";
+      id: string;
+      tool: string;
+      subject: string;
+      argsSummary: string;
+    }
+  | {
+      type: "permission_denied";
+      id: string;
+      tool: string;
+      reason: PermissionDecision["reason"];
+      message: string;
+    }
+  | { type: "permission_mode_changed"; mode: PermissionMode };
 
 export interface TokenUsageInfo {
   inputTokens?: number;

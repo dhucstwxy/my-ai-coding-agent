@@ -7,6 +7,9 @@ import { createCancelToken, type CancelToken } from "../agent/cancel.js";
 import { PlanModeStore } from "../agent/plan-mode.js";
 import type { AgentEvent, AgentLoopOptions } from "../agent/types.js";
 import { DEFAULT_AGENT_OPTIONS } from "../agent/types.js";
+import type { PermissionGate } from "../permission/gate.js";
+import type { PermissionModeStore } from "../permission/mode-store.js";
+import type { PermissionMode, PermissionPrompter } from "../permission/types.js";
 
 /**
  * 对话门面：斜杠命令 + Agent Loop + 取消令牌。
@@ -22,6 +25,8 @@ export class ChatService {
     providerConfig: ProviderConfig,
     registry: ToolRegistry,
     workspaceRoot: string,
+    private readonly gate: PermissionGate,
+    private readonly permissionModes: PermissionModeStore,
     options: AgentLoopOptions = DEFAULT_AGENT_OPTIONS,
   ) {
     this.loop = new AgentLoop(
@@ -30,6 +35,7 @@ export class ChatService {
       providerConfig,
       registry,
       workspaceRoot,
+      gate,
       options,
     );
   }
@@ -43,11 +49,42 @@ export class ChatService {
     return this.planModes.getMode(sessionId);
   }
 
+  getPermissionMode(sessionId: string): PermissionMode {
+    return this.permissionModes.get(sessionId);
+  }
+
+  /** TUI 挂载后换成真正的确认器。未绑定前闸门会拒绝询问。 */
+  attachPrompter(prompter: PermissionPrompter): void {
+    this.gate.setPrompter(prompter);
+  }
+
   async *send(
     sessionId: string,
     userText: string,
   ): AsyncIterable<AgentEvent> {
     const trimmed = userText.trim();
+    const perm = parsePerm(trimmed);
+    if (perm) {
+      this.permissionModes.set(sessionId, perm.mode);
+      yield { type: "permission_mode_changed", mode: perm.mode };
+      const permLabel = permissionLabel(perm.mode);
+      if (!perm.rest) {
+        yield {
+          type: "text_delta",
+          text: `已切换为${permLabel}。`,
+        };
+        yield {
+          type: "agent_stopped",
+          reason: "completed",
+          message: `已切换为${permLabel}`,
+        };
+        yield { type: "done" };
+        return;
+      }
+      yield* this.runLoop(sessionId, perm.rest);
+      return;
+    }
+
     const slash = parseSlash(trimmed);
 
     if (slash) {
@@ -112,4 +149,21 @@ function parseSlash(
     };
   }
   return null;
+}
+
+function parsePerm(
+  text: string,
+): { mode: PermissionMode; rest: string } | null {
+  const matched = /^\/perm\s+(strict|default|allow)(?:\s+([\s\S]*))?$/.exec(text);
+  if (!matched) return null;
+  return {
+    mode: matched[1] as PermissionMode,
+    rest: (matched[2] ?? "").trim(),
+  };
+}
+
+function permissionLabel(mode: PermissionMode): string {
+  if (mode === "strict") return "严格档";
+  if (mode === "allow") return "放行档";
+  return "默认档";
 }

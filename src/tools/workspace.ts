@@ -50,7 +50,11 @@ export function resolveInWorkspace(
       return { ok: true, absPath: real };
     }
   } catch {
-    // realpath 失败时回退到规范化路径（仍已做过前缀检查）
+    return {
+      ok: false,
+      error: `无法确认路径仍在项目内：${userPath}`,
+      errorCode: "path_outside_workspace",
+    };
   }
 
   return { ok: true, absPath: candidate };
