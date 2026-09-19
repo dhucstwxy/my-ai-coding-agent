@@ -18,3 +18,17 @@ providers:
   #   base_url: https://api.anthropic.com
   #   api_key: YOUR_ANTHROPIC_KEY
   #   thinking: true
+
+# MCP Server 列表示例（取消注释并按需填写）：
+# mcp_servers:
+#   fs:
+#     type: stdio
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+#     env:
+#       TOKEN: ${TOKEN}
+#   remote:
+#     type: http
+#     url: https://example.com/mcp
+#     headers:
+#       Authorization: Bearer ${TOKEN}

@@ -9,6 +9,7 @@ import { PermissionGate } from "./permission/gate.js";
 import { loadPermissionRules } from "./permission/load.js";
 import { PermissionModeStore } from "./permission/mode-store.js";
 import { SessionGrantStore } from "./permission/session-grants.js";
+import { connectMcpServers } from "./mcp/register.js";
 
 /** 组装依赖并启动 TUI */
 export async function runCli(): Promise<void> {
@@ -40,6 +41,7 @@ export async function runCli(): Promise<void> {
   const store = new SessionStore();
   const workspaceRoot = process.cwd();
   const registry = createDefaultRegistry();
+  const mcp = await connectMcpServers(workspaceRoot, registry);
   const ruleSet = loadPermissionRules(workspaceRoot);
   const permissionModes = new PermissionModeStore();
   const grants = new SessionGrantStore();
@@ -64,9 +66,24 @@ export async function runCli(): Promise<void> {
   );
   console.log(`工作区：${workspaceRoot}`);
 
+  let closing: Promise<void> | null = null;
+  const shutdown = () => {
+    if (!closing) closing = mcp.close();
+    return closing;
+  };
+  process.once("beforeExit", () => {
+    void shutdown();
+  });
+  process.once("SIGINT", () => {
+    void shutdown().finally(() => process.exit(0));
+  });
+  process.once("SIGTERM", () => {
+    void shutdown().finally(() => process.exit(0));
+  });
+
   startApp({
     store,
     chat,
-    warnings: [...loaded.warnings, ...ruleSet.warnings],
+    warnings: [...loaded.warnings, ...ruleSet.warnings, ...mcp.warnings],
   });
 }

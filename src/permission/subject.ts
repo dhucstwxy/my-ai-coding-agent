@@ -8,6 +8,16 @@ const PATH_TOOLS = new Set(["read_file", "write_file", "edit_file"]);
  * 取出本轮要匹配的字符串。参数缺失时失败，由闸门拒绝。
  */
 export function permissionSubject(tool: string, args: unknown): SubjectResult {
+  if (tool.includes("__")) {
+    const [server, remote] = tool.split("__");
+    if (server && remote) {
+      if (typeof args !== "object" || args === null || Array.isArray(args)) {
+        return { ok: true, subject: "{}" };
+      }
+      return { ok: true, subject: stableJson(args) };
+    }
+  }
+
   if (typeof args !== "object" || args === null || Array.isArray(args)) {
     return { ok: false, message: "参数无法解析" };
   }
@@ -43,4 +53,24 @@ export function permissionSubject(tool: string, args: unknown): SubjectResult {
   }
 
   return { ok: false, message: `不支持的工具：${tool}` };
+}
+
+/** 对象键递归按字典序排序，数组顺序不变。 */
+export function stableJson(value: unknown): string {
+  return JSON.stringify(sortKeys(value ?? {}));
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortKeys);
+  }
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      sorted[key] = sortKeys(record[key]);
+    }
+    return sorted;
+  }
+  return value;
 }

@@ -4,7 +4,7 @@ import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { PermissionEffect, PermissionRule, PermissionSource, RuleSet } from "./types.js";
 
-const TOOL_NAMES = new Set([
+const BUILTIN_TOOL_NAMES = new Set([
   "read_file",
   "write_file",
   "edit_file",
@@ -12,6 +12,13 @@ const TOOL_NAMES = new Set([
   "glob_files",
   "grep_search",
 ]);
+
+function isAllowedToolName(name: string): boolean {
+  if (BUILTIN_TOOL_NAMES.has(name)) return true;
+  const sep = name.indexOf("__");
+  if (sep <= 0) return false;
+  return name.slice(sep + 2).length > 0;
+}
 
 const EFFECTS = new Set<PermissionEffect>(["allow", "ask", "deny"]);
 
@@ -96,7 +103,7 @@ function parseEntry(
 ): { tool: string; pattern: string; effect: PermissionEffect } | null {
   if (typeof entry !== "object" || entry === null) return null;
   const record = entry as Record<string, unknown>;
-  if (typeof record.tool !== "string" || !TOOL_NAMES.has(record.tool)) return null;
+  if (typeof record.tool !== "string" || !isAllowedToolName(record.tool)) return null;
   if (typeof record.pattern !== "string" || record.pattern.trim() === "") return null;
   if (typeof record.effect !== "string" || !EFFECTS.has(record.effect as PermissionEffect)) {
     return null;
