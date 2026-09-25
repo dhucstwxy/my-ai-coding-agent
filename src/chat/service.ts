@@ -2,7 +2,7 @@ import type { ProviderConfig } from "../config/types.js";
 import type { ChatProvider } from "../provider/types.js";
 import type { SessionStore } from "../session/store.js";
 import type { ToolRegistry } from "../tools/registry.js";
-import { AgentLoop } from "../agent/loop.js";
+import { AgentLoop, type AgentPromptContext } from "../agent/loop.js";
 import { createCancelToken, type CancelToken } from "../agent/cancel.js";
 import { PlanModeStore } from "../agent/plan-mode.js";
 import type { AgentEvent, AgentLoopOptions } from "../agent/types.js";
@@ -33,6 +33,7 @@ export class ChatService {
     private readonly gate: PermissionGate,
     private readonly permissionModes: PermissionModeStore,
     options: AgentLoopOptions = DEFAULT_AGENT_OPTIONS,
+    promptContext: AgentPromptContext = {},
   ) {
     this.pipeline = new ContextPipeline(store, provider, providerConfig);
     this.loop = new AgentLoop(
@@ -44,6 +45,7 @@ export class ChatService {
       gate,
       options,
       this.pipeline,
+      promptContext,
     );
   }
 

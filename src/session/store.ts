@@ -1,28 +1,30 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { sessionsDir } from "../config/paths.js";
 import type { ChatMessage, Session, SessionSummary } from "./types.js";
+import { generateSessionId } from "./id.js";
+import {
+  appendLine,
+  readSessionFile,
+  rewriteAll,
+  scanSummary,
+  truncateUnpairedTools,
+} from "./jsonl.js";
 
 export class SessionStore {
   private readonly dir: string;
 
-  constructor(dir = sessionsDir()) {
+  constructor(dir: string) {
     this.dir = dir;
     fs.mkdirSync(this.dir, { recursive: true });
   }
 
   list(): SessionSummary[] {
-    const files = fs.readdirSync(this.dir).filter((f) => f.endsWith(".json"));
+    if (!fs.existsSync(this.dir)) return [];
+    const files = fs.readdirSync(this.dir).filter((f) => f.endsWith(".jsonl"));
     const summaries: SessionSummary[] = [];
     for (const file of files) {
-      const session = this.readFile(path.join(this.dir, file));
-      if (!session) continue;
-      summaries.push({
-        id: session.id,
-        title: session.title,
-        updatedAt: session.updatedAt,
-      });
+      const s = scanSummary(path.join(this.dir, file));
+      if (s) summaries.push(s);
     }
     return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
@@ -30,18 +32,29 @@ export class SessionStore {
   create(title = "新会话"): Session {
     const now = new Date().toISOString();
     const session: Session = {
-      id: randomUUID(),
+      id: generateSessionId(),
       title,
       createdAt: now,
       updatedAt: now,
       messages: [],
     };
-    this.write(session);
+    rewriteAll(this.filePath(session.id), session);
     return session;
   }
 
   get(id: string): Session | null {
-    return this.readFile(path.join(this.dir, `${id}.json`));
+    const read = readSessionFile(this.filePath(id));
+    if (!read) return null;
+    const { messages, truncated } = truncateUnpairedTools(read.session.messages);
+    const session: Session = {
+      ...read.session,
+      messages,
+      updatedAt: truncated ? new Date().toISOString() : read.session.updatedAt,
+    };
+    if (truncated) {
+      rewriteAll(this.filePath(id), session);
+    }
+    return session;
   }
 
   appendMessage(sessionId: string, message: ChatMessage): void {
@@ -52,17 +65,35 @@ export class SessionStore {
     session.messages.push(message);
     session.updatedAt = new Date().toISOString();
 
+    let titleChanged = false;
     if (
       message.role === "user" &&
       session.messages.filter((m) => m.role === "user").length === 1
     ) {
       session.title = truncateTitle(message.content);
+      titleChanged = true;
     }
 
-    this.write(session);
+    if (titleChanged) {
+      rewriteAll(this.filePath(sessionId), session);
+    } else {
+      appendLine(this.filePath(sessionId), {
+        type: "message",
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+        ...(message.thinkingSummary
+          ? { thinkingSummary: message.thinkingSummary }
+          : {}),
+        ...(message.toolCalls ? { toolCalls: message.toolCalls } : {}),
+        ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
+        ...(message.toolName ? { toolName: message.toolName } : {}),
+        ...(message.isError !== undefined ? { isError: message.isError } : {}),
+      });
+    }
   }
 
-  /** 整表替换消息并一次落盘（用于上下文压缩） */
   replaceMessages(sessionId: string, messages: ChatMessage[]): void {
     const session = this.get(sessionId);
     if (!session) {
@@ -70,14 +101,13 @@ export class SessionStore {
     }
     session.messages = messages;
     session.updatedAt = new Date().toISOString();
-    this.write(session);
+    rewriteAll(this.filePath(sessionId), session);
   }
 
   toolResultDir(sessionId: string): string {
     return path.join(this.dir, sessionId, "tool-results");
   }
 
-  /** 写入工具结果全文，返回绝对路径 */
   writeToolResult(sessionId: string, resultId: string, content: string): string {
     const dir = this.toolResultDir(sessionId);
     fs.mkdirSync(dir, { recursive: true });
@@ -93,44 +123,11 @@ export class SessionStore {
     }
     session.title = title;
     session.updatedAt = new Date().toISOString();
-    this.write(session);
+    rewriteAll(this.filePath(sessionId), session);
   }
 
-  private write(session: Session): void {
-    // 只序列化会话字段，绝不写入 api_key
-    const payload: Session = {
-      id: session.id,
-      title: session.title,
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt,
-      messages: session.messages.map((m) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        ...(m.thinkingSummary ? { thinkingSummary: m.thinkingSummary } : {}),
-        ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}),
-        ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
-        ...(m.toolName ? { toolName: m.toolName } : {}),
-        ...(m.isError !== undefined ? { isError: m.isError } : {}),
-        createdAt: m.createdAt,
-      })),
-    };
-    fs.writeFileSync(
-      path.join(this.dir, `${session.id}.json`),
-      JSON.stringify(payload, null, 2),
-      "utf8",
-    );
-  }
-
-  private readFile(filePath: string): Session | null {
-    if (!fs.existsSync(filePath)) return null;
-    try {
-      const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as Session;
-      if (!raw.id || !Array.isArray(raw.messages)) return null;
-      return raw;
-    } catch {
-      return null;
-    }
+  private filePath(id: string): string {
+    return path.join(this.dir, `${id}.jsonl`);
   }
 }
 

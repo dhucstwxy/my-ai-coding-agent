@@ -2,5 +2,6 @@ node_modules/
 dist/
 .mewcode/config.yaml
 .mewcode/permissions.local.yaml
+.mewcode/sessions/
 *.log
 .DS_Store

@@ -6,6 +6,7 @@ import type { ChatMessage, ToolCallRecord } from "../session/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import {
   DEFAULT_REINFORCE_EVERY,
+  SYSTEM_REMINDER_TAG,
   buildPrompt,
   buildReminders,
   formatTimeLabel,
@@ -15,6 +16,11 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   type CompactPipelineEvent,
 } from "../context/index.js";
+import { scheduleMemoryUpdate } from "../memory/index.js";
+import {
+  buildTimeGapReminderBody,
+  needsTimeGapReminder,
+} from "../session/restore.js";
 import type { CancelToken } from "./cancel.js";
 import { collectStream } from "./collector.js";
 import { filterToolsForMode } from "./plan-mode.js";
@@ -28,6 +34,33 @@ import type {
 } from "./types.js";
 import { DEFAULT_AGENT_OPTIONS } from "./types.js";
 
+export interface AgentPromptContext {
+  customInstructions?: string;
+  memoryText?: string;
+}
+
+function wrapReminder(body: string): string {
+  return `<${SYSTEM_REMINDER_TAG}>\n${body.trim()}\n</${SYSTEM_REMINDER_TAG}>`;
+}
+
+/** 稳定前缀 + 自定义指令 + 记忆（不含环境；环境走 reminder） */
+function buildRequestSystem(
+  stableSystem: string,
+  customInstructions?: string,
+  memoryText?: string,
+): string {
+  const parts = [stableSystem];
+  const custom = customInstructions?.trim();
+  if (custom) {
+    parts.push(`## 自定义指令\n\n${custom}`);
+  }
+  const mem = memoryText?.trim();
+  if (mem) {
+    parts.push(`## 长期记忆\n\n${mem}`);
+  }
+  return parts.join("\n\n");
+}
+
 export class AgentLoop {
   readonly pipeline: ContextPipeline;
 
@@ -40,6 +73,7 @@ export class AgentLoop {
     private readonly gate: PermissionGate,
     private readonly options: AgentLoopOptions = DEFAULT_AGENT_OPTIONS,
     pipeline?: ContextPipeline,
+    private readonly promptContext: AgentPromptContext = {},
   ) {
     this.pipeline =
       pipeline ?? new ContextPipeline(store, provider, providerConfig);
@@ -80,6 +114,11 @@ export class AgentLoop {
         return;
       }
 
+      const lastMessageAt =
+        session.messages.length > 0
+          ? session.messages[session.messages.length - 1].createdAt
+          : null;
+
       // 请求前上下文管线
       const compactEvents: CompactPipelineEvent[] = [];
       try {
@@ -112,15 +151,21 @@ export class AgentLoop {
 
       const tools = filterToolsForMode(this.registry, opts.mode);
 
-      let stableSystem: string;
+      let requestSystem: string;
       let reminderMessages: ChatMessage[];
       try {
         const built = buildPrompt({
           workspaceRoot: this.workspaceRoot,
           now: new Date(),
           platform: process.platform,
+          customInstructions: this.promptContext.customInstructions,
+          memoryText: this.promptContext.memoryText,
         });
-        stableSystem = built.stableSystem;
+        requestSystem = buildRequestSystem(
+          built.stableSystem,
+          this.promptContext.customInstructions,
+          this.promptContext.memoryText,
+        );
         reminderMessages = buildReminders({
           mode: opts.mode,
           iteration,
@@ -136,6 +181,24 @@ export class AgentLoop {
           content: r.content,
           createdAt: new Date().toISOString(),
         }));
+
+        // 时间跨度提醒：用「用户发送前」最后一条之外的历史判断更准；
+        // 此处用刚 append 前的 lastMessageAt（排除本轮 user）——上面 lastMessageAt 已含本轮 user。
+        // 改为：若消息数>=2，取倒数第二条。
+        const priorAt =
+          sessionAfter.messages.length >= 2
+            ? sessionAfter.messages[sessionAfter.messages.length - 2].createdAt
+            : null;
+        if (needsTimeGapReminder(priorAt)) {
+          reminderMessages.unshift({
+            id: randomUUID(),
+            role: "user",
+            content: wrapReminder(
+              buildTimeGapReminderBody(priorAt ?? lastMessageAt ?? ""),
+            ),
+            createdAt: new Date().toISOString(),
+          });
+        }
       } catch (err) {
         yield* this.stop(
           sessionId,
@@ -149,7 +212,7 @@ export class AgentLoop {
       try {
         const collector = collectStream(
           this.provider.streamChat({
-            system: stableSystem,
+            system: requestSystem,
             messages: [...reminderMessages, ...sessionAfter.messages],
             model: this.providerConfig.model,
             thinking,
@@ -189,7 +252,6 @@ export class AgentLoop {
         return;
       }
 
-      // 落盘本轮 assistant（可有工具调用）
       if (turn.text.length > 0 || turn.toolCalls.length > 0) {
         const toolCalls: ToolCallRecord[] | undefined =
           turn.toolCalls.length > 0
@@ -212,7 +274,18 @@ export class AgentLoop {
       }
 
       if (turn.toolCalls.length === 0) {
+        // 先结束主路径，再异步更新记忆
         yield* this.stop(sessionId, "completed", "任务完成");
+        const latest = this.store.get(sessionId);
+        if (latest) {
+          scheduleMemoryUpdate({
+            workspaceRoot: this.workspaceRoot,
+            sessionId,
+            recentMessages: latest.messages,
+            provider: this.provider,
+            model: this.providerConfig.model,
+          });
+        }
         return;
       }
 
@@ -247,7 +320,6 @@ export class AgentLoop {
         });
       }
 
-      // 按批次结果顺序维护「连续未知工具」计数
       for (const item of batchResult.results) {
         if (item.unknown) {
           consecutiveUnknown += 1;
