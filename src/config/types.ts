@@ -9,6 +9,8 @@ export interface ProviderConfig {
   baseUrl: string;
   apiKey: string;
   thinking?: boolean;
+  /** 上下文窗口 token 上限；缺省由调用方使用 128000 */
+  contextWindow?: number;
 }
 
 export interface AppConfig {

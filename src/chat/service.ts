@@ -10,6 +10,10 @@ import { DEFAULT_AGENT_OPTIONS } from "../agent/types.js";
 import type { PermissionGate } from "../permission/gate.js";
 import type { PermissionModeStore } from "../permission/mode-store.js";
 import type { PermissionMode, PermissionPrompter } from "../permission/types.js";
+import {
+  ContextPipeline,
+  DEFAULT_CONTEXT_WINDOW,
+} from "../context/index.js";
 
 /**
  * 对话门面：斜杠命令 + Agent Loop + 取消令牌。
@@ -17,18 +21,20 @@ import type { PermissionMode, PermissionPrompter } from "../permission/types.js"
 export class ChatService {
   private readonly planModes = new PlanModeStore();
   private readonly loop: AgentLoop;
+  private readonly pipeline: ContextPipeline;
   private currentCancel: CancelToken | null = null;
 
   constructor(
     private readonly store: SessionStore,
     provider: ChatProvider,
-    providerConfig: ProviderConfig,
+    private readonly providerConfig: ProviderConfig,
     registry: ToolRegistry,
     workspaceRoot: string,
     private readonly gate: PermissionGate,
     private readonly permissionModes: PermissionModeStore,
     options: AgentLoopOptions = DEFAULT_AGENT_OPTIONS,
   ) {
+    this.pipeline = new ContextPipeline(store, provider, providerConfig);
     this.loop = new AgentLoop(
       store,
       provider,
@@ -37,6 +43,7 @@ export class ChatService {
       workspaceRoot,
       gate,
       options,
+      this.pipeline,
     );
   }
 
@@ -63,6 +70,13 @@ export class ChatService {
     userText: string,
   ): AsyncIterable<AgentEvent> {
     const trimmed = userText.trim();
+
+    const compact = parseCompact(trimmed);
+    if (compact) {
+      yield* this.runCompact(sessionId, compact.note);
+      return;
+    }
+
     const perm = parsePerm(trimmed);
     if (perm) {
       this.permissionModes.set(sessionId, perm.mode);
@@ -116,6 +130,84 @@ export class ChatService {
     yield* this.runLoop(sessionId, trimmed);
   }
 
+  private async *runCompact(
+    sessionId: string,
+    userNote: string,
+  ): AsyncIterable<AgentEvent> {
+    const session = this.store.get(sessionId);
+    if (!session) {
+      yield { type: "error", message: `会话不存在：${sessionId}` };
+      yield { type: "done" };
+      return;
+    }
+
+    const buffered: AgentEvent[] = [];
+    let result;
+    try {
+      result = await this.pipeline.run({
+        sessionId,
+        messages: session.messages,
+        contextWindow:
+          this.providerConfig.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        mode: "manual",
+        force: true,
+        userNote: userNote || undefined,
+        onEvent: (e) => buffered.push(e),
+      });
+    } catch (err) {
+      yield {
+        type: "error",
+        message: `手动压缩失败：${err instanceof Error ? err.message : String(err)}`,
+      };
+      yield { type: "done" };
+      return;
+    }
+
+    for (const e of buffered) {
+      yield e;
+    }
+
+    if (result.micro.changed) {
+      yield {
+        type: "text_delta",
+        text: `轻量预防：已将 ${result.micro.spilledCount} 个过大的工具结果存盘。\n`,
+      };
+    }
+
+    if (result.auto?.attempted && result.auto.succeeded) {
+      yield {
+        type: "text_delta",
+        text: "重量压缩成功：较早消息已替换为结构化摘要。\n",
+      };
+    } else if (
+      result.auto?.attempted &&
+      !result.auto.succeeded &&
+      result.auto.error?.includes("无需压缩")
+    ) {
+      yield {
+        type: "text_delta",
+        text: "当前没有可摘要的较早消息，未改写会话。\n",
+      };
+    } else if (result.auto?.attempted && !result.auto.succeeded) {
+      yield {
+        type: "text_delta",
+        text: `重量压缩失败：${result.auto.error ?? "未知错误"}\n`,
+      };
+    } else {
+      yield {
+        type: "text_delta",
+        text: "未执行重量压缩。\n",
+      };
+    }
+
+    yield {
+      type: "agent_stopped",
+      reason: "completed",
+      message: "手动压缩结束",
+    };
+    yield { type: "done" };
+  }
+
   private async *runLoop(
     sessionId: string,
     userText: string,
@@ -131,6 +223,14 @@ export class ChatService {
       }
     }
   }
+}
+
+function parseCompact(text: string): { note: string } | null {
+  if (text === "/compact") return { note: "" };
+  if (text.startsWith("/compact ")) {
+    return { note: text.slice("/compact ".length).trim() };
+  }
+  return null;
 }
 
 function parseSlash(

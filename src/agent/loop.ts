@@ -10,6 +10,11 @@ import {
   buildReminders,
   formatTimeLabel,
 } from "../prompt/index.js";
+import {
+  ContextPipeline,
+  DEFAULT_CONTEXT_WINDOW,
+  type CompactPipelineEvent,
+} from "../context/index.js";
 import type { CancelToken } from "./cancel.js";
 import { collectStream } from "./collector.js";
 import { filterToolsForMode } from "./plan-mode.js";
@@ -24,6 +29,8 @@ import type {
 import { DEFAULT_AGENT_OPTIONS } from "./types.js";
 
 export class AgentLoop {
+  readonly pipeline: ContextPipeline;
+
   constructor(
     private readonly store: SessionStore,
     private readonly provider: ChatProvider,
@@ -32,7 +39,11 @@ export class AgentLoop {
     private readonly workspaceRoot: string,
     private readonly gate: PermissionGate,
     private readonly options: AgentLoopOptions = DEFAULT_AGENT_OPTIONS,
-  ) {}
+    pipeline?: ContextPipeline,
+  ) {
+    this.pipeline =
+      pipeline ?? new ContextPipeline(store, provider, providerConfig);
+  }
 
   async *run(
     sessionId: string,
@@ -65,6 +76,36 @@ export class AgentLoop {
 
       const session = this.store.get(sessionId);
       if (!session) {
+        yield* this.stop(sessionId, "error", `会话不存在：${sessionId}`);
+        return;
+      }
+
+      // 请求前上下文管线
+      const compactEvents: CompactPipelineEvent[] = [];
+      try {
+        await this.pipeline.run({
+          sessionId,
+          messages: session.messages,
+          contextWindow:
+            this.providerConfig.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+          mode: "auto",
+          force: false,
+          onEvent: (e) => compactEvents.push(e),
+        });
+      } catch (err) {
+        yield* this.stop(
+          sessionId,
+          "error",
+          `上下文压缩失败：${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+      for (const e of compactEvents) {
+        yield e;
+      }
+
+      const sessionAfter = this.store.get(sessionId);
+      if (!sessionAfter) {
         yield* this.stop(sessionId, "error", `会话不存在：${sessionId}`);
         return;
       }
@@ -109,7 +150,7 @@ export class AgentLoop {
         const collector = collectStream(
           this.provider.streamChat({
             system: stableSystem,
-            messages: [...reminderMessages, ...session.messages],
+            messages: [...reminderMessages, ...sessionAfter.messages],
             model: this.providerConfig.model,
             thinking,
             tools,
@@ -128,6 +169,14 @@ export class AgentLoop {
           `模型请求失败：${err instanceof Error ? err.message : String(err)}`,
         );
         return;
+      }
+
+      if (turn.usage?.inputTokens !== undefined) {
+        this.pipeline.noteUsage(
+          sessionId,
+          turn.usage.inputTokens,
+          sessionAfter.messages.length,
+        );
       }
 
       if (turn.errorMessage) {

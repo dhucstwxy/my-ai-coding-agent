@@ -10,6 +10,7 @@ providers:
     model: deepseek-v4-flash
     base_url: https://api.deepseek.com
     api_key: YOUR_API_KEY
+    # context_window: 128000  # 上下文窗口 token 上限，缺省 128000
     # thinking: true  # openai 协议不支持，开启时会告警并忽略
 
   # - name: anthropic

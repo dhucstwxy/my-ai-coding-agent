@@ -85,6 +85,7 @@ export function ChatScreen({
     null,
   );
   const [cacheLine, setCacheLine] = useState<string | undefined>();
+  const [compactLine, setCompactLine] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   const promptSessionRef = useRef<PromptSession | null>(null);
@@ -160,14 +161,27 @@ export function ChatScreen({
     setProgress(undefined);
     setStopMessage(undefined);
     setCacheLine(undefined);
+    setCompactLine(undefined);
 
-    const optimisticUser: ChatMessage = {
-      id: `local-user-${Date.now()}`,
-      role: "user",
-      content: text,
-      createdAt: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, optimisticUser]);
+    // /compact 等命令不应乐观插入用户气泡
+    const isSlashOnly =
+      text === "/compact" ||
+      text.startsWith("/compact ") ||
+      text === "/plan" ||
+      text.startsWith("/plan ") ||
+      text === "/do" ||
+      text.startsWith("/do ") ||
+      /^\/perm\s+(strict|default|allow)(?:\s|$)/.test(text);
+
+    if (!isSlashOnly) {
+      const optimisticUser: ChatMessage = {
+        id: `local-user-${Date.now()}`,
+        role: "user",
+        content: text,
+        createdAt: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, optimisticUser]);
+    }
 
     let acc = "";
     let thinkingAcc = "";
@@ -191,6 +205,38 @@ export function ChatScreen({
               `缓存：命中 ${event.cacheHitTokens ?? 0} / 未命中 ${event.cacheMissTokens ?? 0}`,
             );
           }
+        }
+        if (event.type === "compact_start") {
+          const layer =
+            event.layer === "micro" ? "轻量预防" : "重量摘要";
+          setCompactLine(
+            `正在压缩上下文（${layer}，${event.trigger === "manual" ? "手动" : "自动"}）…`,
+          );
+          const mid = store.get(sessionId);
+          setMessages(mid?.messages ?? []);
+        }
+        if (event.type === "compact_done") {
+          if (event.layer === "micro") {
+            setCompactLine(
+              `轻量预防完成：已落盘 ${event.spilledCount ?? 0} 个工具结果`,
+            );
+          } else {
+            setCompactLine(
+              `摘要压缩成功（移除约 ${event.removedMessageCount ?? 0} 条，保留 ${event.keptMessageCount ?? 0} 条）`,
+            );
+          }
+          const mid = store.get(sessionId);
+          setMessages(mid?.messages ?? []);
+        }
+        if (event.type === "compact_failed") {
+          setCompactLine(
+            `摘要压缩失败（连续 ${event.consecutiveFailures} 次）：${event.error}`,
+          );
+        }
+        if (event.type === "compact_circuit_open") {
+          setCompactLine(
+            "自动压缩已熔断：请使用 /compact 手动压缩，或开启新会话",
+          );
         }
         if (event.type === "agent_progress") {
           setProgress(`迭代 ${event.iteration}/${event.maxIterations}`);
@@ -272,10 +318,11 @@ export function ChatScreen({
         <Text color="magenta">[{modeLabel} · 权限{permLabel}]</Text>
       </Text>
       <Text dimColor>
-        Enter 发送；忙碌时 Esc 取消任务；空闲 Esc 返回列表；/plan /do 切换模式；/perm strict|default|allow 切换权限
+        Enter 发送；忙碌时 Esc 取消任务；空闲 Esc 返回列表；/plan /do 切换模式；/perm strict|default|allow 切换权限；/compact 压缩上下文
       </Text>
       {progress ? <Text color="blue">{progress}</Text> : null}
       {cacheLine ? <Text dimColor>{cacheLine}</Text> : null}
+      {compactLine ? <Text color="yellow">{compactLine}</Text> : null}
       {stopMessage ? <Text color="green">状态：{stopMessage}</Text> : null}
 
       {warnings.map((w) => (

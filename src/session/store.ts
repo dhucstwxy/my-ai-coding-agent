@@ -62,6 +62,30 @@ export class SessionStore {
     this.write(session);
   }
 
+  /** 整表替换消息并一次落盘（用于上下文压缩） */
+  replaceMessages(sessionId: string, messages: ChatMessage[]): void {
+    const session = this.get(sessionId);
+    if (!session) {
+      throw new Error(`会话不存在：${sessionId}`);
+    }
+    session.messages = messages;
+    session.updatedAt = new Date().toISOString();
+    this.write(session);
+  }
+
+  toolResultDir(sessionId: string): string {
+    return path.join(this.dir, sessionId, "tool-results");
+  }
+
+  /** 写入工具结果全文，返回绝对路径 */
+  writeToolResult(sessionId: string, resultId: string, content: string): string {
+    const dir = this.toolResultDir(sessionId);
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `${resultId}.txt`);
+    fs.writeFileSync(filePath, content, "utf8");
+    return filePath;
+  }
+
   updateTitle(sessionId: string, title: string): void {
     const session = this.get(sessionId);
     if (!session) {

@@ -87,7 +87,21 @@ function validateProvider(item: unknown, index: number): ProviderConfig {
     thinking = p.thinking;
   }
 
-  return { name, protocol, model, baseUrl, apiKey, thinking };
+  let contextWindow: number | undefined;
+  const rawWindow = p.context_window ?? p.contextWindow;
+  if (rawWindow !== undefined) {
+    if (
+      typeof rawWindow === "number" &&
+      Number.isFinite(rawWindow) &&
+      rawWindow > 0 &&
+      Number.isInteger(rawWindow)
+    ) {
+      contextWindow = rawWindow;
+    }
+    // 非法值忽略，由调用方使用默认窗口
+  }
+
+  return { name, protocol, model, baseUrl, apiKey, thinking, contextWindow };
 }
 
 function requireString(value: unknown, field: string): string {

@@ -29,7 +29,26 @@ export type AgentEvent =
       reason: PermissionDecision["reason"];
       message: string;
     }
-  | { type: "permission_mode_changed"; mode: PermissionMode };
+  | { type: "permission_mode_changed"; mode: PermissionMode }
+  | {
+      type: "compact_start";
+      layer: "micro" | "auto";
+      trigger: "auto" | "manual";
+    }
+  | {
+      type: "compact_done";
+      layer: "micro" | "auto";
+      spilledCount?: number;
+      removedMessageCount?: number;
+      keptMessageCount?: number;
+    }
+  | {
+      type: "compact_failed";
+      layer: "auto";
+      error: string;
+      consecutiveFailures: number;
+    }
+  | { type: "compact_circuit_open" };
 
 export interface TokenUsageInfo {
   inputTokens?: number;
