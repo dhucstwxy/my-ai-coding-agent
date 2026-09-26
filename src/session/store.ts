@@ -5,9 +5,9 @@ import { generateSessionId } from "./id.js";
 import {
   appendLine,
   readSessionFile,
+  repairToolPairing,
   rewriteAll,
   scanSummary,
-  truncateUnpairedTools,
 } from "./jsonl.js";
 
 export class SessionStore {
@@ -42,16 +42,29 @@ export class SessionStore {
     return session;
   }
 
+  /**
+   * 原样读取会话，不做 tool 配对修复。
+   * append / 循环中途必须用这个，避免误删尚未写完结果的 assistant。
+   */
   get(id: string): Session | null {
     const read = readSessionFile(this.filePath(id));
+    return read?.session ?? null;
+  }
+
+  /**
+   * 打开会话时调用：截掉未完成的工具尾部，并丢掉孤立 tool 消息。
+   * 有改动则写回磁盘。
+   */
+  open(id: string): Session | null {
+    const read = readSessionFile(this.filePath(id));
     if (!read) return null;
-    const { messages, truncated } = truncateUnpairedTools(read.session.messages);
+    const { messages, repaired } = repairToolPairing(read.session.messages);
     const session: Session = {
       ...read.session,
       messages,
-      updatedAt: truncated ? new Date().toISOString() : read.session.updatedAt,
+      updatedAt: repaired ? new Date().toISOString() : read.session.updatedAt,
     };
-    if (truncated) {
+    if (repaired) {
       rewriteAll(this.filePath(id), session);
     }
     return session;

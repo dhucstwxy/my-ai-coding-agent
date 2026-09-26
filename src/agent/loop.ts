@@ -32,7 +32,7 @@ import type {
   AgentMode,
   StopReason,
 } from "./types.js";
-import { DEFAULT_AGENT_OPTIONS } from "./types.js";
+import { DEFAULT_AGENT_OPTIONS, isPermissionErrorCode } from "./types.js";
 
 export interface AgentPromptContext {
   customInstructions?: string;
@@ -95,6 +95,8 @@ export class AgentLoop {
       Boolean(this.providerConfig.thinking) && this.provider.supportsThinking;
 
     let consecutiveUnknown = 0;
+    let consecutiveToolOnly = 0;
+    let consecutivePermissionDeny = 0;
 
     for (let iteration = 1; iteration <= this.options.maxIterations; iteration++) {
       if (opts.cancel.isCancelled) {
@@ -318,6 +320,45 @@ export class AgentLoop {
           isError: !item.result.ok,
           createdAt: new Date().toISOString(),
         });
+      }
+
+      // 无有效正文的纯工具轮（含一两句「我来看看」）：防止探索式空转打满上限
+      if (turn.text.trim().length < 40) {
+        consecutiveToolOnly += 1;
+      } else {
+        consecutiveToolOnly = 0;
+      }
+
+      const allPermissionDenied =
+        batchResult.results.length > 0 &&
+        batchResult.results.every(
+          (item) =>
+            !item.result.ok && isPermissionErrorCode(item.result.errorCode),
+        );
+      if (allPermissionDenied) {
+        consecutivePermissionDeny += 1;
+      } else {
+        consecutivePermissionDeny = 0;
+      }
+
+      if (
+        consecutivePermissionDeny >= this.options.maxPermissionDenyIterations
+      ) {
+        yield* this.stop(
+          sessionId,
+          "completed",
+          `连续 ${consecutivePermissionDeny} 轮工具均被权限拒绝，已停止。可用 /perm allow 临时放宽，或为常用工具写 allow 规则后再试。`,
+        );
+        return;
+      }
+
+      if (consecutiveToolOnly >= this.options.maxToolOnlyIterations) {
+        yield* this.stop(
+          sessionId,
+          "completed",
+          `连续 ${consecutiveToolOnly} 轮只有工具调用、没有结论，已停止以免空转。可换更具体的问题，或再说「请根据已有结果直接总结」。`,
+        );
+        return;
       }
 
       for (const item of batchResult.results) {

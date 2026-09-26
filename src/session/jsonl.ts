@@ -30,7 +30,10 @@ function isChatMessage(raw: Record<string, unknown>): raw is ChatMessage & Recor
   );
 }
 
-/** 从第一个未配对的 toolCalls assistant 处截断 */
+/**
+ * 从第一个未配对的 toolCalls assistant 处截断（有调用、缺结果）。
+ * 仅用于会话打开时的恢复，不能在 appendMessage 路径调用。
+ */
 export function truncateUnpairedTools(messages: ChatMessage[]): {
   messages: ChatMessage[];
   truncated: boolean;
@@ -47,6 +50,50 @@ export function truncateUnpairedTools(messages: ChatMessage[]): {
     }
   }
   return { messages, truncated: false };
+}
+
+/**
+ * 丢掉前面没有对应 tool_calls 的孤立 tool 消息。
+ * 用于修复「assistant 被误删、tool 结果仍在」的损坏历史。
+ */
+export function dropOrphanToolMessages(messages: ChatMessage[]): {
+  messages: ChatMessage[];
+  changed: boolean;
+} {
+  const out: ChatMessage[] = [];
+  let changed = false;
+  for (const m of messages) {
+    if (m.role !== "tool") {
+      out.push(m);
+      continue;
+    }
+    let j = out.length - 1;
+    while (j >= 0 && out[j].role === "tool") j -= 1;
+    const prev = j >= 0 ? out[j] : undefined;
+    const matched =
+      prev?.role === "assistant" &&
+      Boolean(m.toolCallId) &&
+      Boolean(prev.toolCalls?.some((tc) => tc.id === m.toolCallId));
+    if (matched) {
+      out.push(m);
+    } else {
+      changed = true;
+    }
+  }
+  return { messages: out, changed };
+}
+
+/** 打开会话时的配对修复：先截未完成尾部，再丢孤立 tool */
+export function repairToolPairing(messages: ChatMessage[]): {
+  messages: ChatMessage[];
+  repaired: boolean;
+} {
+  const truncated = truncateUnpairedTools(messages);
+  const orphans = dropOrphanToolMessages(truncated.messages);
+  return {
+    messages: orphans.messages,
+    repaired: truncated.truncated || orphans.changed,
+  };
 }
 
 export function readSessionFile(filePath: string): ReadSessionResult | null {

@@ -1,5 +1,5 @@
 import type { Session } from "./types.js";
-import { truncateUnpairedTools } from "./jsonl.js";
+import { repairToolPairing } from "./jsonl.js";
 
 export const TIME_GAP_HOURS = 24;
 
@@ -10,12 +10,12 @@ export interface RestoreResult {
 }
 
 export function normalizeSession(session: Session): RestoreResult {
-  const { messages, truncated } = truncateUnpairedTools(session.messages);
+  const { messages, repaired } = repairToolPairing(session.messages);
   const lastMessageAt =
     messages.length > 0 ? messages[messages.length - 1].createdAt : null;
   return {
     session: { ...session, messages },
-    truncatedTail: truncated,
+    truncatedTail: repaired,
     lastMessageAt,
   };
 }

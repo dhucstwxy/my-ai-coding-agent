@@ -65,9 +65,10 @@ export function ChatScreen({
   warnings,
   onBack,
 }: ChatScreenProps) {
-  const initial = store.get(sessionId);
+  // 只在挂载时 open 一次。每次渲染都 open 会在「assistant 已写入、tool 结果未齐」时
+  // 把未配对尾部截掉并 rewriteAll，会话会被清空到只剩 user。
   const [messages, setMessages] = useState<ChatMessage[]>(
-    initial?.messages ?? [],
+    () => store.open(sessionId)?.messages ?? [],
   );
   const [input, setInput] = useState("");
   const [streamingText, setStreamingText] = useState<string | undefined>();
@@ -91,6 +92,8 @@ export function ChatScreen({
   const promptSessionRef = useRef<PromptSession | null>(null);
   if (!promptSessionRef.current) {
     promptSessionRef.current = createPromptSession(setPendingPrompt);
+    // 同步挂上确认器，避免首条消息时仍是默认「直接拒绝」
+    chat.attachPrompter(promptSessionRef.current.prompter);
   }
 
   useEffect(() => {

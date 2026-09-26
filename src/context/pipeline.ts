@@ -100,14 +100,14 @@ export class ContextPipeline {
       DEFAULT_CONTEXT_WINDOW;
     const trigger: CompactTrigger = opts.mode === "manual" ? "manual" : "auto";
 
-    // —— 轻量预防 ——
-    emit({ type: "compact_start", layer: "micro", trigger });
+    // —— 轻量预防（仅在真正有落盘时提示，避免每轮都刷「正在压缩」）——
     const micro = microCompact(opts.messages, {
       sessionId: opts.sessionId,
       store: this.store,
     });
     let messages = micro.messages;
     if (micro.changed) {
+      emit({ type: "compact_start", layer: "micro", trigger });
       this.store.replaceMessages(opts.sessionId, messages);
       // 历史变短/内容变化后重置锚点
       const est = this.getEstimateState(opts.sessionId);
