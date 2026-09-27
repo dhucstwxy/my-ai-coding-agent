@@ -92,6 +92,11 @@ export class ContextPipeline {
     this.estimateBySession.delete(sessionId);
   }
 
+  /** 重量压缩是否已熔断 */
+  isCompactCircuitOpen(sessionId: string): boolean {
+    return this.compactState.isAutoDisabled(sessionId);
+  }
+
   async run(opts: PipelineRunOptions): Promise<PipelineRunResult> {
     const emit = opts.onEvent ?? (() => {});
     const window =

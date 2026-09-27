@@ -2,7 +2,14 @@ import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { CancelToken } from "../agent/cancel.js";
 import type { ChatService } from "../chat/service.js";
-import type { PermissionChoice, PermissionMode, PermissionPrompt, PermissionPrompter } from "../permission/types.js";
+import { complete } from "../commands/complete.js";
+import type {
+  PermissionChoice,
+  PermissionMode,
+  PermissionPrompt,
+  PermissionPrompter,
+} from "../permission/types.js";
+import type { AgentMode } from "../agent/types.js";
 import type { SessionStore } from "../session/store.js";
 import type { ChatMessage } from "../session/types.js";
 import { MessageList } from "./message-list.js";
@@ -52,10 +59,14 @@ export function createPromptSession(
   };
 }
 
-function shortPermLabel(mode: PermissionMode): string {
-  if (mode === "strict") return "严格";
-  if (mode === "allow") return "放行";
-  return "默认";
+function agentMark(mode: AgentMode): string {
+  return mode === "plan" ? "PLAN" : "DEFAULT";
+}
+
+function permMark(mode: PermissionMode): string {
+  if (mode === "strict") return "STRICT";
+  if (mode === "allow") return "ALLOW";
+  return "DEFAULT";
 }
 
 export function ChatScreen({
@@ -76,19 +87,23 @@ export function ChatScreen({
   const [toolStatus, setToolStatus] = useState<string | undefined>();
   const [progress, setProgress] = useState<string | undefined>();
   const [stopMessage, setStopMessage] = useState<string | undefined>();
-  const [modeLabel, setModeLabel] = useState(
-    chat.getMode(sessionId) === "plan" ? "计划模式" : "执行模式",
+  const [modeMark, setModeMark] = useState(
+    agentMark(chat.getMode(sessionId)),
   );
-  const [permLabel, setPermLabel] = useState(
-    shortPermLabel(chat.getPermissionMode(sessionId)),
+  const [permMarkState, setPermMarkState] = useState(
+    permMark(chat.getPermissionMode(sessionId)),
   );
   const [pendingPrompt, setPendingPrompt] = useState<PermissionPrompt | null>(
     null,
   );
   const [cacheLine, setCacheLine] = useState<string | undefined>();
   const [compactLine, setCompactLine] = useState<string | undefined>();
+  const [commandOutput, setCommandOutput] = useState<string | undefined>();
+  const [completions, setCompletions] = useState<string[]>([]);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  /** /clear 后只显示此下标之后的存档消息 */
+  const viewStartRef = useRef(0);
   const promptSessionRef = useRef<PromptSession | null>(null);
   if (!promptSessionRef.current) {
     promptSessionRef.current = createPromptSession(setPendingPrompt);
@@ -101,6 +116,11 @@ export function ChatScreen({
     if (!session) return;
     chat.attachPrompter(session.prompter);
   }, [chat]);
+
+  function syncMessagesFromStore() {
+    const all = store.get(sessionId)?.messages ?? [];
+    setMessages(all.slice(viewStartRef.current));
+  }
 
   useInput((char, key) => {
     const promptSession = promptSessionRef.current;
@@ -139,18 +159,36 @@ export function ChatScreen({
     }
     if (busy) return;
 
+    if (key.tab) {
+      if (input.trimStart().startsWith("/")) {
+        const result = complete(input, chat.getCommandRegistry());
+        if (result.single) {
+          setInput(result.single + (input.endsWith(" ") ? " " : " "));
+          setCompletions([]);
+        } else if (result.candidates.length > 0) {
+          setCompletions(result.candidates);
+        } else {
+          setCompletions([]);
+        }
+      }
+      return;
+    }
+
     if (key.return) {
       const text = input.trim();
       if (!text) return;
+      setCompletions([]);
       void submit(text);
       return;
     }
     if (key.backspace || key.delete) {
       setInput((prev) => prev.slice(0, -1));
+      setCompletions([]);
       return;
     }
     if (char && !key.ctrl && !key.meta) {
       setInput((prev) => prev + char);
+      setCompletions([]);
     }
   });
 
@@ -165,18 +203,13 @@ export function ChatScreen({
     setStopMessage(undefined);
     setCacheLine(undefined);
     setCompactLine(undefined);
+    setCommandOutput(undefined);
+    setCompletions([]);
 
-    // /compact 等命令不应乐观插入用户气泡
-    const isSlashOnly =
-      text === "/compact" ||
-      text.startsWith("/compact ") ||
-      text === "/plan" ||
-      text.startsWith("/plan ") ||
-      text === "/do" ||
-      text.startsWith("/do ") ||
-      /^\/perm\s+(strict|default|allow)(?:\s|$)/.test(text);
+    // 斜杠命令不乐观插入用户气泡
+    const isSlash = text.startsWith("/");
 
-    if (!isSlashOnly) {
+    if (!isSlash) {
       const optimisticUser: ChatMessage = {
         id: `local-user-${Date.now()}`,
         role: "user",
@@ -192,10 +225,19 @@ export function ChatScreen({
     try {
       for await (const event of chat.send(sessionId, text)) {
         if (event.type === "mode_changed") {
-          setModeLabel(event.mode === "plan" ? "计划模式" : "执行模式");
+          setModeMark(agentMark(event.mode));
         }
         if (event.type === "permission_mode_changed") {
-          setPermLabel(shortPermLabel(event.mode));
+          setPermMarkState(permMark(event.mode));
+        }
+        if (event.type === "ui_message") {
+          setCommandOutput(event.text);
+        }
+        if (event.type === "ui_clear") {
+          viewStartRef.current =
+            store.get(sessionId)?.messages.length ?? 0;
+          setMessages([]);
+          setCommandOutput(undefined);
         }
         if (event.type === "permission_denied") {
           setToolStatus(event.message);
@@ -215,8 +257,7 @@ export function ChatScreen({
           setCompactLine(
             `正在压缩上下文（${layer}，${event.trigger === "manual" ? "手动" : "自动"}）…`,
           );
-          const mid = store.get(sessionId);
-          setMessages(mid?.messages ?? []);
+          syncMessagesFromStore();
         }
         if (event.type === "compact_done") {
           if (event.layer === "micro") {
@@ -228,8 +269,7 @@ export function ChatScreen({
               `摘要压缩成功（移除约 ${event.removedMessageCount ?? 0} 条，保留 ${event.keptMessageCount ?? 0} 条）`,
             );
           }
-          const mid = store.get(sessionId);
-          setMessages(mid?.messages ?? []);
+          syncMessagesFromStore();
         }
         if (event.type === "compact_failed") {
           setCompactLine(
@@ -268,8 +308,7 @@ export function ChatScreen({
           setToolStatus(
             `正在执行 ${event.name}… 参数：${event.argsSummary}`,
           );
-          const mid = store.get(sessionId);
-          setMessages(mid?.messages ?? []);
+          syncMessagesFromStore();
           acc = "";
           setStreamingText(undefined);
         }
@@ -277,8 +316,7 @@ export function ChatScreen({
           setToolStatus(
             `${event.ok ? "成功" : "失败"} ${event.name}：${event.resultSummary}`,
           );
-          const mid = store.get(sessionId);
-          setMessages(mid?.messages ?? []);
+          syncMessagesFromStore();
           acc = "";
           setStreamingText("");
         }
@@ -291,12 +329,10 @@ export function ChatScreen({
           setStreamingText(undefined);
           setThinkingLabel(undefined);
           setToolStatus(undefined);
-          const latest = store.get(sessionId);
-          setMessages(latest?.messages ?? []);
+          syncMessagesFromStore();
         }
         if (event.type === "done") {
-          const latest = store.get(sessionId);
-          setMessages(latest?.messages ?? []);
+          syncMessagesFromStore();
           setStreamingText(undefined);
           setThinkingLabel(undefined);
           setToolStatus(undefined);
@@ -318,10 +354,12 @@ export function ChatScreen({
     <Box flexDirection="column">
       <Text bold>
         MewCode — {title}{" "}
-        <Text color="magenta">[{modeLabel} · 权限{permLabel}]</Text>
+        <Text color="magenta">
+          [{modeMark} · {permMarkState}]
+        </Text>
       </Text>
       <Text dimColor>
-        Enter 发送；忙碌时 Esc 取消任务；空闲 Esc 返回列表；/plan /do 切换模式；/perm strict|default|allow 切换权限；/compact 压缩上下文
+        Enter 发送；Tab 补全斜杠命令；忙碌时 Esc 取消；空闲 Esc 返回；/help 查看命令
       </Text>
       {progress ? <Text color="blue">{progress}</Text> : null}
       {cacheLine ? <Text dimColor>{cacheLine}</Text> : null}
@@ -343,6 +381,16 @@ export function ChatScreen({
         />
       </Box>
 
+      {commandOutput ? (
+        <Box marginBottom={1} flexDirection="column">
+          <Text color="cyan">{commandOutput}</Text>
+        </Box>
+      ) : null}
+
+      {completions.length > 0 ? (
+        <Text dimColor>候选：{completions.join("  ")}</Text>
+      ) : null}
+
       {pendingPrompt ? (
         <Box flexDirection="column">
           <Text color="yellow">
@@ -355,7 +403,9 @@ export function ChatScreen({
       {error ? <Text color="red">错误：{error}</Text> : null}
 
       <Box>
-        <Text color="cyan">{pendingPrompt ? "请选择" : busy ? "处理中" : "输入"}&gt; </Text>
+        <Text color="cyan">
+          {pendingPrompt ? "请选择" : busy ? "处理中" : "输入"}&gt;{" "}
+        </Text>
         <Text>{pendingPrompt ? "" : input}</Text>
         {!busy && !pendingPrompt ? <Text dimColor>█</Text> : null}
       </Box>

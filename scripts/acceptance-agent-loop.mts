@@ -14,9 +14,54 @@ import { filterToolsForMode, PlanModeStore } from "../src/agent/plan-mode.ts";
 import type { AgentEvent, CollectedToolCall } from "../src/agent/types.ts";
 import type { StreamEvent } from "../src/provider/types.ts";
 import type { ChatProvider } from "../src/provider/types.ts";
+import { PermissionGate } from "../src/permission/gate.ts";
+import { PermissionModeStore } from "../src/permission/mode-store.ts";
+import { SessionGrantStore } from "../src/permission/session-grants.ts";
+import { buildDefaultRegistry } from "../src/commands/index.ts";
+import type { ProviderConfig } from "../src/config/types.ts";
+import type { SessionStore } from "../src/session/store.ts";
+import type { ToolRegistry } from "../src/tools/registry.ts";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+
+function makeChat(
+  store: SessionStore,
+  provider: ChatProvider,
+  active: ProviderConfig,
+  registry: ToolRegistry,
+  options?: ConstructorParameters<typeof ChatService>[8],
+) {
+  const permissionModes = new PermissionModeStore();
+  const gate = new PermissionGate({
+    rules: [],
+    modeStore: permissionModes,
+    grants: new SessionGrantStore(),
+    workspaceRoot: process.cwd(),
+  });
+  return new ChatService(
+    store,
+    provider,
+    active,
+    registry,
+    process.cwd(),
+    gate,
+    permissionModes,
+    buildDefaultRegistry(),
+    options,
+  );
+}
+
+function makeGate() {
+  const permissionModes = new PermissionModeStore();
+  const gate = new PermissionGate({
+    rules: [],
+    modeStore: permissionModes,
+    grants: new SessionGrantStore(),
+    workspaceRoot: process.cwd(),
+  });
+  return { gate, permissionModes };
+}
 
 const results: Array<{ id: string; pass: boolean; evidence: string }> = [];
 
@@ -151,12 +196,14 @@ async function main() {
     },
   };
   const store = new SessionStore(path.join(os.tmpdir(), `mew-loop-${Date.now()}`));
+  const { gate } = makeGate();
   const loop = new AgentLoop(
     store,
     mockProvider,
     active,
     registry,
     process.cwd(),
+    gate,
     { maxIterations: 2, unknownToolLimit: 2, toolTimeoutMs: 10_000 },
   );
   const sess = store.create();
@@ -194,7 +241,14 @@ async function main() {
       yield { type: "done" };
     },
   };
-  const loopU = new AgentLoop(store, unknownProvider, active, registry, process.cwd());
+  const loopU = new AgentLoop(
+    store,
+    unknownProvider,
+    active,
+    registry,
+    process.cwd(),
+    gate,
+  );
   const sessU = store.create();
   const evU = await drain(
     loopU.run(sessU.id, "bad tools", {
@@ -224,7 +278,7 @@ async function main() {
   );
 
   // slash mode via ChatService
-  const chat = new ChatService(store, mockProvider, active, registry, process.cwd());
+  const chat = makeChat(store, mockProvider, active, registry);
   const sessM = store.create();
   const evPlan = await drain(chat.send(sessM.id, "/plan"));
   record(
@@ -241,14 +295,13 @@ async function main() {
     const liveStore = new SessionStore(
       path.join(os.tmpdir(), `mew-live-${Date.now()}`),
     );
-    const live = new ChatService(
-      liveStore,
-      provider,
-      active,
-      registry,
-      process.cwd(),
-      { maxIterations: 8, unknownToolLimit: 2, toolTimeoutMs: 30_000 },
-    );
+    const live = makeChat(liveStore, provider, active, registry, {
+      maxIterations: 8,
+      unknownToolLimit: 2,
+      toolTimeoutMs: 30_000,
+      maxToolOnlyIterations: 8,
+      maxPermissionDenyIterations: 3,
+    });
     const sLive = liveStore.create();
     const prompt =
       "请先用 read_file 读取 package.json，再根据其中的 name 字段用一句话告诉我项目名称。不要询问我，直接调用工具完成。";

@@ -11,6 +11,37 @@ import { SessionStore } from "../src/session/store.ts";
 import { ChatService } from "../src/chat/service.ts";
 import type { StreamEvent } from "../src/provider/types.ts";
 import { projectConfigPath, userConfigPath } from "../src/config/paths.ts";
+import { PermissionGate } from "../src/permission/gate.ts";
+import { PermissionModeStore } from "../src/permission/mode-store.ts";
+import { SessionGrantStore } from "../src/permission/session-grants.ts";
+import { buildDefaultRegistry } from "../src/commands/index.ts";
+import { createDefaultRegistry } from "../src/tools/create-registry.ts";
+import type { ChatProvider } from "../src/provider/types.ts";
+import type { ProviderConfig } from "../src/config/types.ts";
+
+function makeChat(
+  store: SessionStore,
+  provider: ChatProvider,
+  active: ProviderConfig,
+) {
+  const permissionModes = new PermissionModeStore();
+  const gate = new PermissionGate({
+    rules: [],
+    modeStore: permissionModes,
+    grants: new SessionGrantStore(),
+    workspaceRoot: process.cwd(),
+  });
+  return new ChatService(
+    store,
+    provider,
+    active,
+    createDefaultRegistry(),
+    process.cwd(),
+    gate,
+    permissionModes,
+    buildDefaultRegistry(),
+  );
+}
 
 const results: Array<{ id: string; pass: boolean; evidence: string }> = [];
 
@@ -130,7 +161,7 @@ async function main() {
     apiKey: "sk-invalid-acceptance-key",
     baseUrl: active.baseUrl,
   });
-  const badChat = new ChatService(store, badProvider, {
+  const badChat = makeChat(store, badProvider, {
     ...active,
     apiKey: "sk-invalid-acceptance-key",
   });
@@ -171,7 +202,7 @@ async function main() {
     record("E2E-3", false, "依赖真实密钥完成告警下对话");
   } else {
     const provider = createProvider(active);
-    const chat = new ChatService(store, provider, active);
+    const chat = makeChat(store, provider, active);
     const s1 = store.create();
 
     // 流式一轮
@@ -238,7 +269,7 @@ async function main() {
 
     // thinking true + 仍可聊
     const thinkProvider = createProvider(active);
-    const thinkChat = new ChatService(store, thinkProvider, {
+    const thinkChat = makeChat(store, thinkProvider, {
       ...active,
       thinking: true,
     });

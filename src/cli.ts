@@ -14,6 +14,10 @@ import { SessionGrantStore } from "./permission/session-grants.js";
 import { connectMcpServers } from "./mcp/register.js";
 import { loadInstructions } from "./instructions/index.js";
 import { loadMemoryText } from "./memory/index.js";
+import {
+  buildDefaultRegistry,
+  CommandConflictError,
+} from "./commands/index.js";
 
 /** 组装依赖并启动 TUI */
 export async function runCli(): Promise<void> {
@@ -39,6 +43,17 @@ export async function runCli(): Promise<void> {
     console.error("配置错误：找不到当前供应商");
     process.exitCode = 1;
     return;
+  }
+
+  let commandRegistry;
+  try {
+    commandRegistry = buildDefaultRegistry();
+  } catch (err) {
+    if (err instanceof CommandConflictError) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
   }
 
   const workspaceRoot = process.cwd();
@@ -74,6 +89,7 @@ export async function runCli(): Promise<void> {
     workspaceRoot,
     gate,
     permissionModes,
+    commandRegistry,
     undefined,
     {
       customInstructions: instructions.text || undefined,

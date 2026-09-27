@@ -48,7 +48,11 @@ export type AgentEvent =
       error: string;
       consecutiveFailures: number;
     }
-  | { type: "compact_circuit_open" };
+  | { type: "compact_circuit_open" }
+  /** 本地命令反馈，不写会话存档 */
+  | { type: "ui_message"; text: string }
+  /** 仅清空界面消息列表 */
+  | { type: "ui_clear" };
 
 export interface TokenUsageInfo {
   inputTokens?: number;

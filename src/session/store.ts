@@ -139,6 +139,11 @@ export class SessionStore {
     rewriteAll(this.filePath(sessionId), session);
   }
 
+  /** 会话 JSONL 路径 */
+  pathFor(id: string): string {
+    return this.filePath(id);
+  }
+
   private filePath(id: string): string {
     return path.join(this.dir, `${id}.jsonl`);
   }
