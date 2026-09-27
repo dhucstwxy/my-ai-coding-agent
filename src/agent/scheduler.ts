@@ -62,7 +62,7 @@ export async function* executeToolBatch(
   if (readonlyCalls.length > 0 && !cancel.isCancelled) {
     for (const call of readonlyCalls) {
       if (cancel.isCancelled) break;
-      const guarded = yield* guardCall(call, gate, sessionId, cancel);
+      const guarded = yield* guardCall(call, gate, sessionId, cancel, true);
       if (guarded) {
         results.push({ call, result: guarded, unknown: false });
         continue;
@@ -102,7 +102,7 @@ export async function* executeToolBatch(
 
   for (const call of sideEffectCalls) {
     if (cancel.isCancelled) break;
-    const guarded = yield* guardCall(call, gate, sessionId, cancel);
+    const guarded = yield* guardCall(call, gate, sessionId, cancel, false);
     if (guarded) {
       results.push({ call, result: guarded, unknown: false });
       continue;
@@ -140,6 +140,7 @@ async function* guardCall(
   gate: PermissionGate,
   sessionId: string,
   cancel: CancelToken,
+  readOnly: boolean,
 ): AsyncGenerator<AgentEvent, ToolResult | null> {
   if (call.parseError) {
     const result: ToolResult = {
@@ -151,7 +152,7 @@ async function* guardCall(
     return result;
   }
 
-  const decision = await gate.check({ sessionId, call, signal: cancel });
+  const decision = await gate.check({ sessionId, call, signal: cancel, readOnly });
   if (decision.effect === "deny") {
     const result: ToolResult = {
       ok: false,

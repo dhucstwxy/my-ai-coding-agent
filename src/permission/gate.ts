@@ -24,6 +24,11 @@ export interface PermissionCheckInput {
     arguments: Record<string, unknown> | string;
   };
   signal: CancelToken;
+  /**
+   * 本次调用是否为只读（无副作用）。
+   * 默认档下若没有规则命中，只读调用直接放行而不询问；严格档与放行档不受影响。
+   */
+  readOnly?: boolean;
 }
 
 export interface PermissionGateDeps {
@@ -104,6 +109,10 @@ export class PermissionGate {
     }
     if (mode === "allow") {
       return allow("已允许：当前为放行档");
+    }
+    // 默认档：只读工具不改变工作区，直接放行，避免每次读取都要用户确认
+    if (input.readOnly) {
+      return allow("已允许：默认档下只读工具直接放行");
     }
     return this.askUser(input, subject.subject);
   }
