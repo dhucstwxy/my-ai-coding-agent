@@ -31,6 +31,16 @@ export function userMemoryDir(home = os.homedir()): string {
   return path.join(home, ".mewcode", "memory");
 }
 
+/** 项目 Skill 目录：<cwd>/.mewcode/skills */
+export function projectSkillsDir(cwd = process.cwd()): string {
+  return path.join(cwd, ".mewcode", "skills");
+}
+
+/** 用户 Skill 目录：~/.mewcode/skills */
+export function userSkillsDir(home = os.homedir()): string {
+  return path.join(home, ".mewcode", "skills");
+}
+
 /** @deprecated 旧全局会话目录，本章起不再作为主存储 */
 export function sessionsDir(home = os.homedir()): string {
   return path.join(home, ".mewcode", "sessions");

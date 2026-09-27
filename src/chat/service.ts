@@ -1,9 +1,18 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { ProviderConfig } from "../config/types.js";
+import { createProvider } from "../provider/factory.js";
 import type { ChatProvider } from "../provider/types.js";
-import type { SessionStore } from "../session/store.js";
+import { SessionStore } from "../session/store.js";
+import type { ChatMessage } from "../session/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
-import { AgentLoop, type AgentPromptContext } from "../agent/loop.js";
+import {
+  AgentLoop,
+  type AgentPromptContext,
+  type SkillTurnContext,
+} from "../agent/loop.js";
 import { createCancelToken, type CancelToken } from "../agent/cancel.js";
 import { PlanModeStore } from "../agent/plan-mode.js";
 import type {
@@ -29,6 +38,27 @@ import {
   dispatch,
 } from "../commands/index.js";
 import { memoryIndexPath } from "../memory/paths.js";
+import {
+  runSkill,
+  SkillFatalError,
+  visibleToolNames,
+  type SkillCatalog,
+  type SkillCommandBridge,
+  type SkillCommandSync,
+  type SkillRecord,
+  type SkillRun,
+  type SkillRunDeps,
+  type SkillSession,
+} from "../skills/index.js";
+
+export interface SkillHost {
+  catalog: SkillCatalog;
+  session: SkillSession;
+  providers: ProviderConfig[];
+  sync: SkillCommandSync;
+  bridge: SkillCommandBridge;
+  runDeps: SkillRunDeps;
+}
 
 /**
  * 对话门面：命令分发 + Agent Loop + 取消令牌。
@@ -38,7 +68,13 @@ export class ChatService {
   private readonly loop: AgentLoop;
   private readonly pipeline: ContextPipeline;
   private readonly workspaceRoot: string;
+  private readonly provider: ChatProvider;
+  private readonly toolRegistry: ToolRegistry;
+  private readonly loopOptions: AgentLoopOptions;
+  private readonly promptContext: AgentPromptContext;
   private currentCancel: CancelToken | null = null;
+  private emitCurrent: ((event: AgentEvent) => void) | null = null;
+  private warningKey = "";
   private readonly lastTokenUsage = new Map<string, TokenUsageInfo>();
 
   constructor(
@@ -52,8 +88,13 @@ export class ChatService {
     private readonly commands: CommandRegistry,
     options: AgentLoopOptions = DEFAULT_AGENT_OPTIONS,
     promptContext: AgentPromptContext = {},
+    private readonly skills?: SkillHost,
   ) {
     this.workspaceRoot = workspaceRoot;
+    this.provider = provider;
+    this.toolRegistry = registry;
+    this.loopOptions = options;
+    this.promptContext = promptContext;
     this.pipeline = new ContextPipeline(store, provider, providerConfig);
     this.loop = new AgentLoop(
       store,
@@ -66,6 +107,10 @@ export class ChatService {
       this.pipeline,
       promptContext,
     );
+    if (skills) {
+      this.loop.setSkillContext(this.createSkillTurn());
+      this.bindSkillRun(skills);
+    }
   }
 
   getCommandRegistry(): CommandRegistry {
@@ -111,6 +156,8 @@ export class ChatService {
 
     const work = (async () => {
       try {
+        this.emitCurrent = channel.push;
+        this.refreshSkills(channel.push);
         const result = await dispatch(userText, ctx, this.commands);
         if (!result.handled) {
           for await (const e of this.runLoop(sessionId, result.text)) {
@@ -147,6 +194,7 @@ export class ChatService {
         });
         channel.push({ type: "done" });
       } finally {
+        this.emitCurrent = null;
         channel.close();
       }
     })();
@@ -208,7 +256,149 @@ export class ChatService {
         };
       },
       getMemoryInfo: () => readMemoryInfo(this.workspaceRoot),
+      clearActivatedSkills: () => {
+        this.skills?.session.clear(sessionId);
+      },
     };
+  }
+
+  private refreshSkills(emit: (event: AgentEvent) => void): void {
+    if (!this.skills) return;
+    try {
+      const names = new Set(this.toolRegistry.list().map((tool) => tool.name));
+      this.skills.catalog.refresh(names);
+    } catch (err) {
+      if (err instanceof SkillFatalError) {
+        console.error(err.message);
+        process.exit(1);
+      }
+      throw err;
+    }
+    this.skills.sync.sync(this.commands);
+    const key = this.skills.catalog
+      .warnings()
+      .map((warning) => `${warning.path}:${warning.reason}`)
+      .join("\n");
+    if (key && key !== this.warningKey) {
+      this.warningKey = key;
+      emit({
+        type: "ui_message",
+        text: this.skills.catalog
+          .warnings()
+          .map((warning) => `${warning.path}：${warning.reason}`)
+          .join("\n"),
+      });
+    }
+  }
+
+  private bindSkillRun(skills: SkillHost): void {
+    const deps = skills.runDeps;
+    deps.session = skills.session;
+    deps.findModel = (model) =>
+      skills.providers.some((provider) => provider.model === model);
+    deps.recentMessages = (sessionId, count) => {
+      if (count <= 0) return [];
+      const messages = this.store.get(sessionId)?.messages ?? [];
+      return messages.slice(-count);
+    };
+    deps.appendSummary = (sessionId, text) => {
+      this.store.appendMessage(sessionId, {
+        id: randomUUID(),
+        role: "assistant",
+        content: text,
+        createdAt: new Date().toISOString(),
+      });
+    };
+    deps.submitToAgent = async (sessionId, task) => {
+      const emit = this.emitCurrent;
+      if (!emit) return;
+      for await (const event of this.runLoop(sessionId, task)) {
+        emit(event);
+      }
+    };
+    deps.runIsolated = (input) => this.runIsolated(input);
+    skills.bridge.runSkill = (run) => runSkill(run, deps);
+  }
+
+  private createSkillTurn(): SkillTurnContext {
+    const skills = this.skills!;
+    return {
+      pinnedText: (sessionId) =>
+        skills.session.pinnedText(sessionId, skills.catalog),
+      catalogText: () => skills.catalog.catalogText(),
+      visibleNames: (sessionId, mode) =>
+        visibleToolNames({
+          allNames: this.toolRegistry.list().map((tool) => tool.name),
+          planMode: mode,
+          active: skills.session.recordsFor(sessionId, skills.catalog),
+        }),
+      resolveModel: (sessionId) => {
+        const name = skills.session.modelFor(sessionId, skills.catalog);
+        if (!name) {
+          return { provider: this.provider, config: this.providerConfig };
+        }
+        const found = skills.providers.find((item) => item.model === name);
+        if (!found) return { error: `找不到模型：${name}` };
+        if (
+          found.name === this.providerConfig.name &&
+          found.model === this.providerConfig.model
+        ) {
+          return { provider: this.provider, config: this.providerConfig };
+        }
+        return { provider: createProvider(found), config: found };
+      },
+    };
+  }
+
+  private async runIsolated(input: {
+    sessionId: string;
+    skill: SkillRecord;
+    task: string;
+    history: ChatMessage[];
+  }): Promise<string> {
+    const skills = this.skills;
+    const wanted = skills?.session.modelFor(input.sessionId, skills.catalog);
+    const found = wanted
+      ? skills?.providers.find((item) => item.model === wanted)
+      : undefined;
+    const config = found ?? this.providerConfig;
+    const provider =
+      config === this.providerConfig
+        ? this.provider
+        : createProvider(config);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mew-skill-run-"));
+    const temp = new SessionStore(dir);
+    const created = temp.create();
+    for (const message of input.history) {
+      temp.appendMessage(created.id, { ...message, id: randomUUID() });
+    }
+    const loop = new AgentLoop(
+      temp,
+      provider,
+      config,
+      this.toolRegistry,
+      this.workspaceRoot,
+      this.gate,
+      this.loopOptions,
+      undefined,
+      this.promptContext,
+    );
+    if (skills) loop.setSkillContext(this.createSkillTurn());
+    const cancel = createCancelToken();
+    const emit = this.emitCurrent;
+    for await (const event of loop.run(created.id, input.task, {
+      cancel,
+      mode: this.planModes.getMode(input.sessionId),
+      skillSessionId: input.sessionId,
+    })) {
+      if (event.type === "done") continue;
+      emit?.(event);
+    }
+    const messages = temp.get(created.id)?.messages ?? [];
+    const last = [...messages]
+      .reverse()
+      .find((message) => message.role === "assistant" && message.content.trim());
+    return last?.content.trim() ?? "";
   }
 
   private buildStatusSnapshot(sessionId: string): StatusSnapshot {

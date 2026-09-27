@@ -48,6 +48,7 @@ export interface CommandContext {
   runCompact(note: string): Promise<void>;
   getSessionInfo(): SessionInfo | null;
   getMemoryInfo(): MemoryScopeInfo[];
+  clearActivatedSkills(): void;
 }
 
 export interface CommandDefinition {

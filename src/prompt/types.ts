@@ -63,6 +63,10 @@ export interface ReminderInput {
   iteration: number;
   reinforceEvery: number;
   environment: EnvironmentInfo;
+  /** 已激活 Skill 的完整说明，放在环境提醒最前 */
+  pinnedText?: string;
+  /** 只有名字和一句话说明 */
+  catalogText?: string;
 }
 
 /** 进入稳定 system 的固定模块（不含环境与可选槽） */

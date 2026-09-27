@@ -5,12 +5,11 @@ import { createHelpCommand } from "./builtin/help.js";
 import { memoryCommand } from "./builtin/memory.js";
 import { permissionCommand } from "./builtin/permission.js";
 import { planCommand } from "./builtin/plan.js";
-import { reviewCommand } from "./builtin/review.js";
 import { sessionCommand } from "./builtin/session.js";
 import { statusCommand } from "./builtin/status.js";
 import { CommandRegistry } from "./registry.js";
 
-/** 构建并注册全部十个内置命令 */
+/** 构建并注册内置命令。review 改由 Skill 提供，不在这里注册。 */
 export function buildDefaultRegistry(): CommandRegistry {
   const registry = new CommandRegistry();
   const help = createHelpCommand(() => registry.listVisible());
@@ -25,7 +24,6 @@ export function buildDefaultRegistry(): CommandRegistry {
     memoryCommand,
     permissionCommand,
     statusCommand,
-    reviewCommand,
   ]) {
     registry.register(def);
   }

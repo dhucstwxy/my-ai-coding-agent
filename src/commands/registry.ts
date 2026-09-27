@@ -32,6 +32,18 @@ export class CommandRegistry {
     return this.byName.get(name.toLowerCase());
   }
 
+  /** 卸下主名及其别名。名字不存在时不抛错。 */
+  unregister(name: string): void {
+    const def = this.byName.get(name.toLowerCase());
+    if (!def) return;
+    const keys = [def.name, ...(def.aliases ?? [])].map((key) =>
+      key.toLowerCase(),
+    );
+    for (const key of keys) {
+      if (this.byName.get(key) === def) this.byName.delete(key);
+    }
+  }
+
   /** 可见命令（去重，按主名） */
   listVisible(): CommandDefinition[] {
     const seen = new Set<CommandDefinition>();

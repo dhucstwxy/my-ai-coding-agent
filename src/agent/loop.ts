@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ProviderConfig } from "../config/types.js";
 import type { ChatProvider } from "../provider/types.js";
+import type { ToolDefinition } from "../tools/types.js";
 import type { SessionStore } from "../session/store.js";
 import type { ChatMessage, ToolCallRecord } from "../session/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
@@ -39,6 +40,18 @@ export interface AgentPromptContext {
   memoryText?: string;
 }
 
+/** 每轮向主循环提供 Skill 提醒、工具视图和模型 */
+export interface SkillTurnContext {
+  pinnedText(sessionId: string): string;
+  catalogText(): string;
+  visibleNames(sessionId: string, mode: AgentMode): string[];
+  resolveModel(
+    sessionId: string,
+  ):
+    | { provider: ChatProvider; config: ProviderConfig }
+    | { error: string };
+}
+
 function wrapReminder(body: string): string {
   return `<${SYSTEM_REMINDER_TAG}>\n${body.trim()}\n</${SYSTEM_REMINDER_TAG}>`;
 }
@@ -63,6 +76,11 @@ function buildRequestSystem(
 
 export class AgentLoop {
   readonly pipeline: ContextPipeline;
+  private skillContext: SkillTurnContext | null = null;
+
+  setSkillContext(context: SkillTurnContext | null): void {
+    this.skillContext = context;
+  }
 
   constructor(
     private readonly store: SessionStore,
@@ -82,7 +100,12 @@ export class AgentLoop {
   async *run(
     sessionId: string,
     userText: string,
-    opts: { cancel: CancelToken; mode: AgentMode },
+    opts: {
+      cancel: CancelToken;
+      mode: AgentMode;
+      /** 工具与提醒使用的会话。独立模式用主会话，存档用临时会话 */
+      skillSessionId?: string;
+    },
   ): AsyncIterable<AgentEvent> {
     this.store.appendMessage(sessionId, {
       id: randomUUID(),
@@ -91,8 +114,7 @@ export class AgentLoop {
       createdAt: new Date().toISOString(),
     });
 
-    const thinking =
-      Boolean(this.providerConfig.thinking) && this.provider.supportsThinking;
+    const skillSessionId = opts.skillSessionId ?? sessionId;
 
     let consecutiveUnknown = 0;
     let consecutiveToolOnly = 0;
@@ -151,7 +173,24 @@ export class AgentLoop {
         return;
       }
 
-      const tools = filterToolsForMode(this.registry, opts.mode);
+      let provider = this.provider;
+      let providerConfig = this.providerConfig;
+      if (this.skillContext) {
+        const resolved = this.skillContext.resolveModel(skillSessionId);
+        if ("error" in resolved) {
+          yield* this.stop(sessionId, "error", resolved.error);
+          return;
+        }
+        provider = resolved.provider;
+        providerConfig = resolved.config;
+      }
+      const thinking =
+        Boolean(providerConfig.thinking) && provider.supportsThinking;
+      const tools = this.skillContext
+        ? this.definitionsFor(
+            this.skillContext.visibleNames(skillSessionId, opts.mode),
+          )
+        : filterToolsForMode(this.registry, opts.mode);
 
       let requestSystem: string;
       let reminderMessages: ChatMessage[];
@@ -177,6 +216,8 @@ export class AgentLoop {
             timeLabel: formatTimeLabel(new Date()),
             platform: process.platform,
           },
+          pinnedText: this.skillContext?.pinnedText(skillSessionId),
+          catalogText: this.skillContext?.catalogText(),
         }).map((r) => ({
           id: randomUUID(),
           role: "user" as const,
@@ -213,10 +254,10 @@ export class AgentLoop {
       let turn;
       try {
         const collector = collectStream(
-          this.provider.streamChat({
+          provider.streamChat({
             system: requestSystem,
             messages: [...reminderMessages, ...sessionAfter.messages],
-            model: this.providerConfig.model,
+            model: providerConfig.model,
             thinking,
             tools,
           }),
@@ -297,6 +338,7 @@ export class AgentLoop {
         {
           workspaceRoot: this.workspaceRoot,
           timeoutMs: this.options.toolTimeoutMs,
+          sessionId: skillSessionId,
         },
         opts.cancel,
         this.gate,
@@ -388,6 +430,20 @@ export class AgentLoop {
       "max_iterations",
       `已达到迭代上限（${this.options.maxIterations}），已停止循环`,
     );
+  }
+
+  private definitionsFor(names: string[]): ToolDefinition[] {
+    const defs: ToolDefinition[] = [];
+    for (const name of names) {
+      const tool = this.registry.get(name);
+      if (!tool) continue;
+      defs.push({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      });
+    }
+    return defs;
   }
 
   private async *stop(

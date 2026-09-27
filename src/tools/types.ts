@@ -18,6 +18,8 @@ export interface ToolResult {
 export interface ToolContext {
   workspaceRoot: string;
   timeoutMs: number;
+  /** 当前主会话，供 load_skill 写入激活表 */
+  sessionId?: string;
 }
 
 /** 统一工具接口 */

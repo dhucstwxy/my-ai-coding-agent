@@ -6,6 +6,7 @@ export const clearCommand: CommandDefinition = {
   usage: "/clear",
   type: "ui",
   handler(ctx) {
+    ctx.clearActivatedSkills();
     ctx.ui.clearScreen();
   },
 };

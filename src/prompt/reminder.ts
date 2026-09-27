@@ -12,12 +12,19 @@ function wrapReminder(body: string): string {
 
 function environmentBody(input: ReminderInput): string {
   const e = input.environment;
-  return [
+  const base = [
     "当前运行环境（每轮可能变化，勿写入可缓存指令）：",
     `- 工作区根路径：${e.workspaceRoot}`,
     `- 当前时间：${e.timeLabel}`,
     `- 操作系统：${e.platform}`,
   ].join("\n");
+  const parts: string[] = [];
+  const pinned = input.pinnedText?.trim();
+  const catalog = input.catalogText?.trim();
+  if (pinned) parts.push(pinned);
+  if (catalog) parts.push(catalog);
+  parts.push(base);
+  return parts.join("\n\n");
 }
 
 const PLAN_FULL = [

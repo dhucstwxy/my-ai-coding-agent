@@ -4,7 +4,7 @@ import { projectSessionsDir } from "./config/paths.js";
 import { createProvider } from "./provider/factory.js";
 import { SessionStore } from "./session/store.js";
 import { cleanupExpiredSessions } from "./session/cleanup.js";
-import { ChatService } from "./chat/service.js";
+import { ChatService, type SkillHost } from "./chat/service.js";
 import { createDefaultRegistry } from "./tools/create-registry.js";
 import { startApp } from "./tui/index.js";
 import { PermissionGate } from "./permission/gate.js";
@@ -18,6 +18,15 @@ import {
   buildDefaultRegistry,
   CommandConflictError,
 } from "./commands/index.js";
+import {
+  createLoadSkillTool,
+  SkillCatalog,
+  SkillCommandSync,
+  SkillFatalError,
+  SkillSession,
+  type SkillCommandBridge,
+  type SkillRunDeps,
+} from "./skills/index.js";
 
 /** 组装依赖并启动 TUI */
 export async function runCli(): Promise<void> {
@@ -70,8 +79,40 @@ export async function runCli(): Promise<void> {
 
   const provider = createProvider(active);
   const store = new SessionStore(sessionsPath);
+  const skillCatalog = new SkillCatalog(workspaceRoot);
+  const skillSession = new SkillSession();
+  const skillBridge: SkillCommandBridge = {
+    runSkill: async () => "",
+  };
+  const skillRunDeps: SkillRunDeps = {
+    session: skillSession,
+    submitToAgent: async () => {},
+    runIsolated: async () => "",
+    findModel: (model) =>
+      loaded.config.providers.some((item) => item.model === model),
+    recentMessages: () => [],
+    appendSummary: () => {},
+  };
+  const skillSync = new SkillCommandSync(skillCatalog, skillBridge);
   const registry = createDefaultRegistry();
+  registry.register(
+    createLoadSkillTool({
+      catalog: skillCatalog,
+      session: skillSession,
+      run: skillRunDeps,
+    }),
+  );
   const mcp = await connectMcpServers(workspaceRoot, registry);
+  try {
+    skillCatalog.refresh(new Set(registry.list().map((tool) => tool.name)));
+  } catch (err) {
+    if (err instanceof SkillFatalError) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+  skillSync.sync(commandRegistry);
   const ruleSet = loadPermissionRules(workspaceRoot);
   const permissionModes = new PermissionModeStore();
   const grants = new SessionGrantStore();
@@ -81,6 +122,14 @@ export async function runCli(): Promise<void> {
     grants,
     workspaceRoot,
   });
+  const skillHost: SkillHost = {
+    catalog: skillCatalog,
+    session: skillSession,
+    providers: loaded.config.providers,
+    sync: skillSync,
+    bridge: skillBridge,
+    runDeps: skillRunDeps,
+  };
   const chat = new ChatService(
     store,
     provider,
@@ -95,6 +144,7 @@ export async function runCli(): Promise<void> {
       customInstructions: instructions.text || undefined,
       memoryText: memory.text || undefined,
     },
+    skillHost,
   );
 
   console.log(
@@ -127,6 +177,7 @@ export async function runCli(): Promise<void> {
       ...mcp.warnings,
       ...instructions.warnings,
       ...memory.warnings,
+      ...skillCatalog.warnings().map((warning) => `${warning.path}：${warning.reason}`),
     ],
   });
 }
