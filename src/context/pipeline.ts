@@ -66,6 +66,12 @@ export interface PipelineRunResult {
 export class ContextPipeline {
   private readonly compactState = new CompactStateStore();
   private readonly estimateBySession = new Map<string, TokenEstimateState>();
+  private onCompact?: (sessionId: string) => Promise<void> | void;
+
+  /** 压缩开始时调用。未设置则行为与原来相同。 */
+  setOnCompact(handler: (sessionId: string) => Promise<void> | void): void {
+    this.onCompact = handler;
+  }
 
   constructor(
     private readonly store: SessionStore,
@@ -112,7 +118,7 @@ export class ContextPipeline {
     });
     let messages = micro.messages;
     if (micro.changed) {
-      emit({ type: "compact_start", layer: "micro", trigger });
+      await this.notifyCompact(emit, opts.sessionId, "micro", trigger);
       this.store.replaceMessages(opts.sessionId, messages);
       // 历史变短/内容变化后重置锚点
       const est = this.getEstimateState(opts.sessionId);
@@ -153,7 +159,7 @@ export class ContextPipeline {
       return result;
     }
 
-    emit({ type: "compact_start", layer: "auto", trigger });
+    await this.notifyCompact(emit, opts.sessionId, "auto", trigger);
     const thinking =
       Boolean(this.providerConfig.thinking) && this.provider.supportsThinking;
     const autoResult = await autoCompact({
@@ -216,5 +222,22 @@ export class ContextPipeline {
     result.messages = autoResult.messages;
     result.auto = { attempted: true, succeeded: true };
     return result;
+  }
+
+  private async notifyCompact(
+    emit: (event: CompactPipelineEvent) => void,
+    sessionId: string,
+    layer: CompactLayer,
+    trigger: CompactTrigger,
+  ): Promise<void> {
+    emit({ type: "compact_start", layer, trigger });
+    if (!this.onCompact) return;
+    try {
+      await this.onCompact(sessionId);
+    } catch (err) {
+      console.error(
+        `[hook] compact 失败：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }

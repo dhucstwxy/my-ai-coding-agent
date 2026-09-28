@@ -1,4 +1,6 @@
+import type { HookEngine } from "../hooks/engine.js";
 import type { PermissionGate } from "../permission/gate.js";
+import { permissionSubject } from "../permission/subject.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext, ToolResult } from "../tools/types.js";
 import type { CancelToken } from "./cancel.js";
@@ -18,9 +20,15 @@ export interface SchedulerResult {
   }>;
 }
 
+/** 可选。未传时工具调度与现在相同，不发 Hook。 */
+export interface SchedulerHooks {
+  engine: HookEngine;
+  sessionId: string;
+}
+
 /**
  * 只读并发，副作用串行；未知工具不执行，返回结构化失败。
- * 已知工具在 execute 之前先过权限闸门。
+ * 已知工具先过 pre_tool，未拦截时再过权限闸门。
  */
 export async function* executeToolBatch(
   calls: CollectedToolCall[],
@@ -29,6 +37,7 @@ export async function* executeToolBatch(
   cancel: CancelToken,
   gate: PermissionGate,
   sessionId: string,
+  hooks?: SchedulerHooks,
 ): AsyncGenerator<AgentEvent, SchedulerResult> {
   const readonlyCalls: CollectedToolCall[] = [];
   const sideEffectCalls: CollectedToolCall[] = [];
@@ -62,7 +71,7 @@ export async function* executeToolBatch(
   if (readonlyCalls.length > 0 && !cancel.isCancelled) {
     for (const call of readonlyCalls) {
       if (cancel.isCancelled) break;
-      const guarded = yield* guardCall(call, gate, sessionId, cancel, true);
+      const guarded = yield* guardCall(call, gate, sessionId, cancel, true, hooks);
       if (guarded) {
         results.push({ call, result: guarded, unknown: false });
         continue;
@@ -96,13 +105,14 @@ export async function* executeToolBatch(
         ok: item.result.ok,
         resultSummary: summarizeResult(item.result.content),
       };
+      await dispatchPostTool(hooks, item.call);
       results.push(item);
     }
   }
 
   for (const call of sideEffectCalls) {
     if (cancel.isCancelled) break;
-    const guarded = yield* guardCall(call, gate, sessionId, cancel, false);
+    const guarded = yield* guardCall(call, gate, sessionId, cancel, false, hooks);
     if (guarded) {
       results.push({ call, result: guarded, unknown: false });
       continue;
@@ -121,6 +131,7 @@ export async function* executeToolBatch(
       ok: result.ok,
       resultSummary: summarizeResult(result.content),
     };
+    await dispatchPostTool(hooks, call);
     results.push({ call, result, unknown: false });
   }
 
@@ -141,6 +152,7 @@ async function* guardCall(
   sessionId: string,
   cancel: CancelToken,
   readOnly: boolean,
+  hooks?: SchedulerHooks,
 ): AsyncGenerator<AgentEvent, ToolResult | null> {
   if (call.parseError) {
     const result: ToolResult = {
@@ -150,6 +162,27 @@ async function* guardCall(
     };
     yield* emitExecution(call, result);
     return result;
+  }
+
+  if (hooks) {
+    const subject = permissionSubject(call.name, call.arguments);
+    if (subject.ok) {
+      const hooked = await hooks.engine.dispatch({
+        event: "pre_tool",
+        sessionId: hooks.sessionId,
+        tool: call.name,
+        subject: subject.subject,
+      });
+      if (hooked.blocked) {
+        const result: ToolResult = {
+          ok: false,
+          content: hooked.denyMessage ?? "Hook 已拦截该工具",
+          errorCode: "hook_blocked",
+        };
+        yield* emitExecution(call, result);
+        return result;
+      }
+    }
   }
 
   const decision = await gate.check({ sessionId, call, signal: cancel, readOnly });
@@ -189,6 +222,26 @@ async function* emitExecution(
     ok: result.ok,
     resultSummary: summarizeResult(result.content),
   };
+}
+
+async function dispatchPostTool(
+  hooks: SchedulerHooks | undefined,
+  call: CollectedToolCall,
+): Promise<void> {
+  if (!hooks) return;
+  const subject = permissionSubject(call.name, call.arguments);
+  try {
+    await hooks.engine.dispatch({
+      event: "post_tool",
+      sessionId: hooks.sessionId,
+      tool: call.name,
+      ...(subject.ok ? { subject: subject.subject } : {}),
+    });
+  } catch (err) {
+    console.error(
+      `[hook] post_tool 失败：${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 async function runOne(

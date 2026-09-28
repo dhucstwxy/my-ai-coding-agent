@@ -41,6 +41,21 @@ export function userSkillsDir(home = os.homedir()): string {
   return path.join(home, ".mewcode", "skills");
 }
 
+/** 用户 Hook：~/.mewcode/hooks.yaml */
+export function userHooksPath(home = os.homedir()): string {
+  return path.join(home, ".mewcode", "hooks.yaml");
+}
+
+/** 项目 Hook：<cwd>/.mewcode/hooks.yaml */
+export function projectHooksPath(cwd = process.cwd()): string {
+  return path.join(cwd, ".mewcode", "hooks.yaml");
+}
+
+/** 本地 Hook：<cwd>/.mewcode/hooks.local.yaml */
+export function localHooksPath(cwd = process.cwd()): string {
+  return path.join(cwd, ".mewcode", "hooks.local.yaml");
+}
+
 /** @deprecated 旧全局会话目录，本章起不再作为主存储 */
 export function sessionsDir(home = os.homedir()): string {
   return path.join(home, ".mewcode", "sessions");

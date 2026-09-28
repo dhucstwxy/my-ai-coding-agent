@@ -21,8 +21,10 @@ function environmentBody(input: ReminderInput): string {
   const parts: string[] = [];
   const pinned = input.pinnedText?.trim();
   const catalog = input.catalogText?.trim();
+  const hookPrompt = input.hookPrompt?.trim();
   if (pinned) parts.push(pinned);
   if (catalog) parts.push(catalog);
+  if (hookPrompt) parts.push(hookPrompt);
   parts.push(base);
   return parts.join("\n\n");
 }

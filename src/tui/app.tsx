@@ -8,9 +8,13 @@ export interface AppProps {
   store: SessionStore;
   chat: ChatService;
   warnings: string[];
+  sessionHooks?: {
+    enter(sessionId: string): Promise<void>;
+    leave(sessionId: string): Promise<void>;
+  };
 }
 
-export function App({ store, chat, warnings }: AppProps) {
+export function App({ store, chat, warnings, sessionHooks }: AppProps) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [listVersion, setListVersion] = useState(0);
 
@@ -36,6 +40,7 @@ export function App({ store, chat, warnings }: AppProps) {
       store={store}
       chat={chat}
       warnings={warnings}
+      sessionHooks={sessionHooks}
       onBack={() => {
         setSessionId(null);
         setListVersion((v) => v + 1);

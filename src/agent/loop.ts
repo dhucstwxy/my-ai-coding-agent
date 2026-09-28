@@ -25,6 +25,8 @@ import {
 import type { CancelToken } from "./cancel.js";
 import { collectStream } from "./collector.js";
 import { filterToolsForMode } from "./plan-mode.js";
+import type { HookEngine } from "../hooks/engine.js";
+import type { HookSessionState } from "../hooks/state.js";
 import type { PermissionGate } from "../permission/gate.js";
 import { executeToolBatch } from "./scheduler.js";
 import type {
@@ -77,9 +79,16 @@ function buildRequestSystem(
 export class AgentLoop {
   readonly pipeline: ContextPipeline;
   private skillContext: SkillTurnContext | null = null;
+  private hookEngine: HookEngine | null = null;
+  private hookState: HookSessionState | null = null;
 
   setSkillContext(context: SkillTurnContext | null): void {
     this.skillContext = context;
+  }
+
+  setHooks(engine: HookEngine, state: HookSessionState): void {
+    this.hookEngine = engine;
+    this.hookState = state;
   }
 
   constructor(
@@ -104,6 +113,34 @@ export class AgentLoop {
       cancel: CancelToken;
       mode: AgentMode;
       /** 工具与提醒使用的会话。独立模式用主会话，存档用临时会话 */
+      skillSessionId?: string;
+    },
+  ): AsyncIterable<AgentEvent> {
+    const hookSessionId = opts.skillSessionId ?? sessionId;
+    if (this.hookEngine) {
+      await this.hookEngine.dispatch({
+        event: "turn_start",
+        sessionId: hookSessionId,
+      });
+    }
+    try {
+      yield* this.executeRun(sessionId, userText, opts);
+    } finally {
+      if (this.hookEngine) {
+        await this.hookEngine.dispatch({
+          event: "turn_end",
+          sessionId: hookSessionId,
+        });
+      }
+    }
+  }
+
+  private async *executeRun(
+    sessionId: string,
+    userText: string,
+    opts: {
+      cancel: CancelToken;
+      mode: AgentMode;
       skillSessionId?: string;
     },
   ): AsyncIterable<AgentEvent> {
@@ -216,6 +253,7 @@ export class AgentLoop {
             timeLabel: formatTimeLabel(new Date()),
             platform: process.platform,
           },
+          hookPrompt: this.hookState?.prompts(skillSessionId) ?? "",
           pinnedText: this.skillContext?.pinnedText(skillSessionId),
           catalogText: this.skillContext?.catalogText(),
         }).map((r) => ({
@@ -343,6 +381,9 @@ export class AgentLoop {
         opts.cancel,
         this.gate,
         sessionId,
+        this.hookEngine
+          ? { engine: this.hookEngine, sessionId: skillSessionId }
+          : undefined,
       );
 
       let schedulerResult = await batch.next();

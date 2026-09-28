@@ -27,6 +27,13 @@ import {
   type SkillCommandBridge,
   type SkillRunDeps,
 } from "./skills/index.js";
+import {
+  HookEngine,
+  HookFatalError,
+  HookSessionState,
+  createHookSessions,
+  loadHooks,
+} from "./hooks/index.js";
 
 /** 组装依赖并启动 TUI */
 export async function runCli(): Promise<void> {
@@ -113,6 +120,20 @@ export async function runCli(): Promise<void> {
     throw err;
   }
   skillSync.sync(commandRegistry);
+  let hookRules;
+  try {
+    hookRules = loadHooks(workspaceRoot);
+  } catch (err) {
+    if (err instanceof HookFatalError) {
+      console.error(err.message);
+      await mcp.close();
+      process.exit(1);
+    }
+    throw err;
+  }
+  const hookState = new HookSessionState();
+  const hookEngine = new HookEngine(hookRules, hookState, workspaceRoot);
+  const sessionHooks = createHookSessions(hookEngine, hookState);
   const ruleSet = loadPermissionRules(workspaceRoot);
   const permissionModes = new PermissionModeStore();
   const grants = new SessionGrantStore();
@@ -145,6 +166,7 @@ export async function runCli(): Promise<void> {
       memoryText: memory.text || undefined,
     },
     skillHost,
+    { engine: hookEngine, state: hookState },
   );
 
   console.log(
@@ -155,7 +177,13 @@ export async function runCli(): Promise<void> {
 
   let closing: Promise<void> | null = null;
   const shutdown = () => {
-    if (!closing) closing = mcp.close();
+    if (!closing) {
+      closing = (async () => {
+        const id = sessionHooks.current();
+        if (id) await sessionHooks.leave(id);
+        await mcp.close();
+      })();
+    }
     return closing;
   };
   process.once("beforeExit", () => {
@@ -179,5 +207,6 @@ export async function runCli(): Promise<void> {
       ...memory.warnings,
       ...skillCatalog.warnings().map((warning) => `${warning.path}：${warning.reason}`),
     ],
+    sessionHooks,
   });
 }

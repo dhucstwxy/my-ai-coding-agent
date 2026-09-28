@@ -37,6 +37,8 @@ import {
   type UiPort,
   dispatch,
 } from "../commands/index.js";
+import type { HookEngine } from "../hooks/engine.js";
+import type { HookSessionState } from "../hooks/state.js";
 import { memoryIndexPath } from "../memory/paths.js";
 import {
   runSkill,
@@ -50,6 +52,11 @@ import {
   type SkillRunDeps,
   type SkillSession,
 } from "../skills/index.js";
+
+export interface HookHost {
+  engine: HookEngine;
+  state: HookSessionState;
+}
 
 export interface SkillHost {
   catalog: SkillCatalog;
@@ -76,6 +83,8 @@ export class ChatService {
   private emitCurrent: ((event: AgentEvent) => void) | null = null;
   private warningKey = "";
   private readonly lastTokenUsage = new Map<string, TokenUsageInfo>();
+  private hookEngine: HookEngine | null = null;
+  private hookState: HookSessionState | null = null;
 
   constructor(
     private readonly store: SessionStore,
@@ -89,6 +98,7 @@ export class ChatService {
     options: AgentLoopOptions = DEFAULT_AGENT_OPTIONS,
     promptContext: AgentPromptContext = {},
     private readonly skills?: SkillHost,
+    hooks?: HookHost,
   ) {
     this.workspaceRoot = workspaceRoot;
     this.provider = provider;
@@ -110,6 +120,28 @@ export class ChatService {
     if (skills) {
       this.loop.setSkillContext(this.createSkillTurn());
       this.bindSkillRun(skills);
+    }
+    if (hooks) {
+      this.hookEngine = hooks.engine;
+      this.hookState = hooks.state;
+      this.loop.setHooks(hooks.engine, hooks.state);
+      this.pipeline.setOnCompact(async (id) => {
+        await hooks.engine.dispatch({ event: "compact", sessionId: id });
+      });
+      store.setOnMessage((id, message) => {
+        const event =
+          message.role === "user"
+            ? "user_message"
+            : message.role === "assistant"
+              ? "assistant_message"
+              : null;
+        if (!event) return;
+        void hooks.engine.dispatch({ event, sessionId: id }).catch((err) => {
+          console.error(
+            `[hook] 消息事件失败：${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      });
     }
   }
 
@@ -384,6 +416,9 @@ export class ChatService {
       this.promptContext,
     );
     if (skills) loop.setSkillContext(this.createSkillTurn());
+    if (this.hookEngine && this.hookState) {
+      loop.setHooks(this.hookEngine, this.hookState);
+    }
     const cancel = createCancelToken();
     const emit = this.emitCurrent;
     for await (const event of loop.run(created.id, input.task, {

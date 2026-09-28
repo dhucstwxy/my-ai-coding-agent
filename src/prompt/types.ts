@@ -67,6 +67,8 @@ export interface ReminderInput {
   pinnedText?: string;
   /** 只有名字和一句话说明 */
   catalogText?: string;
+  /** Hook 注入的提示词，位于 Skill 目录之后、环境信息之前 */
+  hookPrompt?: string;
 }
 
 /** 进入稳定 system 的固定模块（不含环境与可选槽） */

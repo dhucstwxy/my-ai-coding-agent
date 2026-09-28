@@ -20,6 +20,11 @@ export interface ChatScreenProps {
   chat: ChatService;
   warnings: string[];
   onBack: () => void;
+  /** 进入时 session_start，卸载（含返回会话列表）时 session_end 并清空注入 */
+  sessionHooks?: {
+    enter(sessionId: string): Promise<void>;
+    leave(sessionId: string): Promise<void>;
+  };
 }
 
 export interface PromptSession {
@@ -75,7 +80,14 @@ export function ChatScreen({
   chat,
   warnings,
   onBack,
+  sessionHooks,
 }: ChatScreenProps) {
+  useEffect(() => {
+    void sessionHooks?.enter(sessionId);
+    return () => {
+      void sessionHooks?.leave(sessionId);
+    };
+  }, [sessionHooks, sessionId]);
   // 只在挂载时 open 一次。每次渲染都 open 会在「assistant 已写入、tool 结果未齐」时
   // 把未配对尾部截掉并 rewriteAll，会话会被清空到只剩 user。
   const [messages, setMessages] = useState<ChatMessage[]>(

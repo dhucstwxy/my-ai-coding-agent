@@ -8,11 +8,20 @@ export interface StartAppDeps {
   store: SessionStore;
   chat: ChatService;
   warnings: string[];
+  sessionHooks?: {
+    enter(sessionId: string): Promise<void>;
+    leave(sessionId: string): Promise<void>;
+  };
 }
 
 /** 挂载 Ink TUI */
 export function startApp(deps: StartAppDeps) {
   return render(
-    <App store={deps.store} chat={deps.chat} warnings={deps.warnings} />,
+    <App
+      store={deps.store}
+      chat={deps.chat}
+      warnings={deps.warnings}
+      sessionHooks={deps.sessionHooks}
+    />,
   );
 }

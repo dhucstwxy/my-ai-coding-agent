@@ -12,6 +12,12 @@ import {
 
 export class SessionStore {
   private readonly dir: string;
+  private messageListener?: (sessionId: string, message: ChatMessage) => void;
+
+  /** 未设置时不发消息事件。监听器抛错只记日志。 */
+  setOnMessage(listener: (sessionId: string, message: ChatMessage) => void): void {
+    this.messageListener = listener;
+  }
 
   constructor(dir: string) {
     this.dir = dir;
@@ -104,6 +110,19 @@ export class SessionStore {
         ...(message.toolName ? { toolName: message.toolName } : {}),
         ...(message.isError !== undefined ? { isError: message.isError } : {}),
       });
+    }
+    this.notifyMessage(sessionId, message);
+  }
+
+  private notifyMessage(sessionId: string, message: ChatMessage): void {
+    if (!this.messageListener) return;
+    if (message.role !== "user" && message.role !== "assistant") return;
+    try {
+      this.messageListener(sessionId, message);
+    } catch (err) {
+      console.error(
+        `[hook] 消息事件失败：${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
