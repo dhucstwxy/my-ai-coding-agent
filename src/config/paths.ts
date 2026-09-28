@@ -56,6 +56,16 @@ export function localHooksPath(cwd = process.cwd()): string {
   return path.join(cwd, ".mewcode", "hooks.local.yaml");
 }
 
+/** 用户角色目录：~/.mewcode/agents */
+export function userAgentsDir(home = os.homedir()): string {
+  return path.join(home, ".mewcode", "agents");
+}
+
+/** 项目角色目录：<cwd>/.mewcode/agents */
+export function projectAgentsDir(cwd = process.cwd()): string {
+  return path.join(cwd, ".mewcode", "agents");
+}
+
 /** @deprecated 旧全局会话目录，本章起不再作为主存储 */
 export function sessionsDir(home = os.homedir()): string {
   return path.join(home, ".mewcode", "sessions");

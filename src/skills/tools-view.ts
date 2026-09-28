@@ -3,6 +3,7 @@ import type { SkillRecord } from "./types.js";
 const PLAN_READONLY = new Set(["read_file", "glob_files", "grep_search"]);
 
 const LOAD_SKILL = "load_skill";
+const AGENT = "agent";
 
 /**
  * 先按计划/执行模式过滤，再对写了白名单的已激活 Skill 取交集。
@@ -26,6 +27,9 @@ export function visibleToolNames(input: {
 
   if (!names.includes(LOAD_SKILL)) {
     names.push(LOAD_SKILL);
+  }
+  if (input.allNames.includes(AGENT) && !names.includes(AGENT)) {
+    names.push(AGENT);
   }
   return names;
 }

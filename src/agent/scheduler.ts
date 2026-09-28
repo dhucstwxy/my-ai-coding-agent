@@ -27,6 +27,16 @@ export interface SchedulerHooks {
 }
 
 /**
+ * 可选。未传时与现在相同。
+ * 传入后，委派工具以及不在名单里的调用直接失败，不发 Hook，也不过闸门。
+ */
+export interface ToolBatchPolicy {
+  allowNames?: ReadonlySet<string>;
+  /** false 时闸门把询问改成拒绝 */
+  interactive?: boolean;
+}
+
+/**
  * 只读并发，副作用串行；未知工具不执行，返回结构化失败。
  * 已知工具先过 pre_tool，未拦截时再过权限闸门。
  */
@@ -38,6 +48,7 @@ export async function* executeToolBatch(
   gate: PermissionGate,
   sessionId: string,
   hooks?: SchedulerHooks,
+  policy?: ToolBatchPolicy,
 ): AsyncGenerator<AgentEvent, SchedulerResult> {
   const readonlyCalls: CollectedToolCall[] = [];
   const sideEffectCalls: CollectedToolCall[] = [];
@@ -71,7 +82,7 @@ export async function* executeToolBatch(
   if (readonlyCalls.length > 0 && !cancel.isCancelled) {
     for (const call of readonlyCalls) {
       if (cancel.isCancelled) break;
-      const guarded = yield* guardCall(call, gate, sessionId, cancel, true, hooks);
+      const guarded = yield* guardCall(call, gate, sessionId, cancel, true, hooks, policy);
       if (guarded) {
         results.push({ call, result: guarded, unknown: false });
         continue;
@@ -112,7 +123,7 @@ export async function* executeToolBatch(
 
   for (const call of sideEffectCalls) {
     if (cancel.isCancelled) break;
-    const guarded = yield* guardCall(call, gate, sessionId, cancel, false, hooks);
+    const guarded = yield* guardCall(call, gate, sessionId, cancel, false, hooks, policy);
     if (guarded) {
       results.push({ call, result: guarded, unknown: false });
       continue;
@@ -153,6 +164,7 @@ async function* guardCall(
   cancel: CancelToken,
   readOnly: boolean,
   hooks?: SchedulerHooks,
+  policy?: ToolBatchPolicy,
 ): AsyncGenerator<AgentEvent, ToolResult | null> {
   if (call.parseError) {
     const result: ToolResult = {
@@ -162,6 +174,18 @@ async function* guardCall(
     };
     yield* emitExecution(call, result);
     return result;
+  }
+
+  if (policy?.allowNames) {
+    if (call.name === "agent" || !policy.allowNames.has(call.name)) {
+      const result: ToolResult = {
+        ok: false,
+        content: `当前子任务不能调用：${call.name}`,
+        errorCode: "tool_not_allowed",
+      };
+      yield* emitExecution(call, result);
+      return result;
+    }
   }
 
   if (hooks) {
@@ -185,7 +209,13 @@ async function* guardCall(
     }
   }
 
-  const decision = await gate.check({ sessionId, call, signal: cancel, readOnly });
+  const decision = await gate.check({
+    sessionId,
+    call,
+    signal: cancel,
+    readOnly,
+    ...(policy?.interactive === false ? { interactive: false } : {}),
+  });
   if (decision.effect === "deny") {
     const result: ToolResult = {
       ok: false,

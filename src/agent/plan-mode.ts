@@ -23,5 +23,5 @@ export function filterToolsForMode(
   const all = registry.toDefinitions();
   if (mode === "execute") return all;
   const allow = new Set<string>(PLAN_READONLY_TOOLS);
-  return all.filter((t) => allow.has(t.name));
+  return all.filter((t) => allow.has(t.name) || t.name === "agent");
 }

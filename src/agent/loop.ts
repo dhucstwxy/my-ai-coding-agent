@@ -28,7 +28,8 @@ import { filterToolsForMode } from "./plan-mode.js";
 import type { HookEngine } from "../hooks/engine.js";
 import type { HookSessionState } from "../hooks/state.js";
 import type { PermissionGate } from "../permission/gate.js";
-import { executeToolBatch } from "./scheduler.js";
+import { executeToolBatch, type ToolBatchPolicy } from "./scheduler.js";
+import type { RequestSnapshot } from "../agents/types.js";
 import type {
   AgentEvent,
   AgentLoopOptions,
@@ -52,6 +53,30 @@ export interface SkillTurnContext {
   ):
     | { provider: ChatProvider; config: ProviderConfig }
     | { error: string };
+}
+
+/** 一轮主循环或子循环的运行参数。未传的字段保持原有行为。 */
+export interface AgentRunOptions {
+  cancel: CancelToken;
+  mode: AgentMode;
+  /** 工具与提醒使用的会话。独立模式用主会话，存档用临时会话 */
+  skillSessionId?: string;
+  /** 为真时不再写入 userText。送回续跑时，正文已经先写入会话 */
+  skipUserAppend?: boolean;
+  /** 子循环使用这段系统提示，不再拼主对话的固定提示 */
+  systemOverride?: string;
+  /** 子循环使用这份工具定义 */
+  toolsOverride?: ToolDefinition[];
+  /** 为真时按会话原文发送，不再插入提醒 */
+  literalMessages?: boolean;
+  /** 为 false 时不覆盖父循环的请求快照 */
+  recordSnapshot?: boolean;
+  maxIterations?: number;
+  skipMemoryUpdate?: boolean;
+  /** 为真时不把用量记入上下文估算 */
+  skipContextUsage?: boolean;
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
+  toolPolicy?: ToolBatchPolicy;
 }
 
 function wrapReminder(body: string): string {
@@ -81,6 +106,22 @@ export class AgentLoop {
   private skillContext: SkillTurnContext | null = null;
   private hookEngine: HookEngine | null = null;
   private hookState: HookSessionState | null = null;
+  private lastSnapshot: RequestSnapshot | null = null;
+  private agentCatalogText: () => string = () => "";
+
+  /** 父循环最近一次真正发出的请求。子循环不写这份快照。 */
+  getRequestSnapshot(): RequestSnapshot | null {
+    if (!this.lastSnapshot) return null;
+    return {
+      system: this.lastSnapshot.system,
+      tools: this.lastSnapshot.tools.map((tool) => ({ ...tool })),
+      messages: this.lastSnapshot.messages.map((message) => ({ ...message })),
+    };
+  }
+
+  setAgentCatalog(read: () => string): void {
+    this.agentCatalogText = read;
+  }
 
   setSkillContext(context: SkillTurnContext | null): void {
     this.skillContext = context;
@@ -109,12 +150,7 @@ export class AgentLoop {
   async *run(
     sessionId: string,
     userText: string,
-    opts: {
-      cancel: CancelToken;
-      mode: AgentMode;
-      /** 工具与提醒使用的会话。独立模式用主会话，存档用临时会话 */
-      skillSessionId?: string;
-    },
+    opts: AgentRunOptions,
   ): AsyncIterable<AgentEvent> {
     const hookSessionId = opts.skillSessionId ?? sessionId;
     if (this.hookEngine) {
@@ -138,26 +174,25 @@ export class AgentLoop {
   private async *executeRun(
     sessionId: string,
     userText: string,
-    opts: {
-      cancel: CancelToken;
-      mode: AgentMode;
-      skillSessionId?: string;
-    },
+    opts: AgentRunOptions,
   ): AsyncIterable<AgentEvent> {
-    this.store.appendMessage(sessionId, {
-      id: randomUUID(),
-      role: "user",
-      content: userText,
-      createdAt: new Date().toISOString(),
-    });
+    if (!opts.skipUserAppend) {
+      this.store.appendMessage(sessionId, {
+        id: randomUUID(),
+        role: "user",
+        content: userText,
+        createdAt: new Date().toISOString(),
+      });
+    }
 
     const skillSessionId = opts.skillSessionId ?? sessionId;
+    const maxIterations = opts.maxIterations ?? this.options.maxIterations;
 
     let consecutiveUnknown = 0;
     let consecutiveToolOnly = 0;
     let consecutivePermissionDeny = 0;
 
-    for (let iteration = 1; iteration <= this.options.maxIterations; iteration++) {
+    for (let iteration = 1; iteration <= maxIterations; iteration++) {
       if (opts.cancel.isCancelled) {
         yield* this.stop(sessionId, "cancelled", "用户已取消当前任务");
         return;
@@ -166,7 +201,7 @@ export class AgentLoop {
       yield {
         type: "agent_progress",
         iteration,
-        maxIterations: this.options.maxIterations,
+        maxIterations,
       };
 
       const session = this.store.get(sessionId);
@@ -223,15 +258,31 @@ export class AgentLoop {
       }
       const thinking =
         Boolean(providerConfig.thinking) && provider.supportsThinking;
-      const tools = this.skillContext
-        ? this.definitionsFor(
-            this.skillContext.visibleNames(skillSessionId, opts.mode),
-          )
-        : filterToolsForMode(this.registry, opts.mode);
+      const tools =
+        opts.toolsOverride ??
+        (this.skillContext
+          ? this.definitionsFor(
+              this.skillContext.visibleNames(skillSessionId, opts.mode),
+            )
+          : filterToolsForMode(this.registry, opts.mode));
 
       let requestSystem: string;
       let reminderMessages: ChatMessage[];
       try {
+        if (opts.literalMessages) {
+          requestSystem = opts.systemOverride ?? "";
+          const hookPrompt = this.hookState?.prompts(skillSessionId)?.trim() ?? "";
+          reminderMessages = hookPrompt
+            ? [
+                {
+                  id: randomUUID(),
+                  role: "user" as const,
+                  content: wrapReminder(hookPrompt),
+                  createdAt: new Date().toISOString(),
+                },
+              ]
+            : [];
+        } else {
         const built = buildPrompt({
           workspaceRoot: this.workspaceRoot,
           now: new Date(),
@@ -256,6 +307,7 @@ export class AgentLoop {
           hookPrompt: this.hookState?.prompts(skillSessionId) ?? "",
           pinnedText: this.skillContext?.pinnedText(skillSessionId),
           catalogText: this.skillContext?.catalogText(),
+          agentCatalog: this.agentCatalogText(),
         }).map((r) => ({
           id: randomUUID(),
           role: "user" as const,
@@ -280,6 +332,7 @@ export class AgentLoop {
             createdAt: new Date().toISOString(),
           });
         }
+        }
       } catch (err) {
         yield* this.stop(
           sessionId,
@@ -289,12 +342,23 @@ export class AgentLoop {
         return;
       }
 
+      const requestMessages = opts.literalMessages
+        ? [...sessionAfter.messages, ...reminderMessages]
+        : [...reminderMessages, ...sessionAfter.messages];
+      if (opts.recordSnapshot !== false) {
+        this.lastSnapshot = {
+          system: requestSystem,
+          tools: tools.map((tool) => ({ ...tool })),
+          messages: requestMessages.map((message) => ({ ...message })),
+        };
+      }
+
       let turn;
       try {
         const collector = collectStream(
           provider.streamChat({
             system: requestSystem,
-            messages: [...reminderMessages, ...sessionAfter.messages],
+            messages: requestMessages,
             model: providerConfig.model,
             thinking,
             tools,
@@ -315,12 +379,15 @@ export class AgentLoop {
         return;
       }
 
-      if (turn.usage?.inputTokens !== undefined) {
-        this.pipeline.noteUsage(
-          sessionId,
-          turn.usage.inputTokens,
-          sessionAfter.messages.length,
-        );
+      if (turn.usage) {
+        opts.onUsage?.(turn.usage.inputTokens ?? 0, turn.usage.outputTokens ?? 0);
+        if (!opts.skipContextUsage && turn.usage.inputTokens !== undefined) {
+          this.pipeline.noteUsage(
+            sessionId,
+            turn.usage.inputTokens,
+            sessionAfter.messages.length,
+          );
+        }
       }
 
       if (turn.errorMessage) {
@@ -357,15 +424,17 @@ export class AgentLoop {
       if (turn.toolCalls.length === 0) {
         // 先结束主路径，再异步更新记忆
         yield* this.stop(sessionId, "completed", "任务完成");
-        const latest = this.store.get(sessionId);
-        if (latest) {
-          scheduleMemoryUpdate({
-            workspaceRoot: this.workspaceRoot,
-            sessionId,
-            recentMessages: latest.messages,
-            provider: this.provider,
-            model: this.providerConfig.model,
-          });
+        if (!opts.skipMemoryUpdate) {
+          const latest = this.store.get(sessionId);
+          if (latest) {
+            scheduleMemoryUpdate({
+              workspaceRoot: this.workspaceRoot,
+              sessionId,
+              recentMessages: latest.messages,
+              provider: this.provider,
+              model: this.providerConfig.model,
+            });
+          }
         }
         return;
       }
@@ -384,6 +453,7 @@ export class AgentLoop {
         this.hookEngine
           ? { engine: this.hookEngine, sessionId: skillSessionId }
           : undefined,
+        opts.toolPolicy,
       );
 
       let schedulerResult = await batch.next();
@@ -469,7 +539,7 @@ export class AgentLoop {
     yield* this.stop(
       sessionId,
       "max_iterations",
-      `已达到迭代上限（${this.options.maxIterations}），已停止循环`,
+      `已达到迭代上限（${maxIterations}），已停止循环`,
     );
   }
 

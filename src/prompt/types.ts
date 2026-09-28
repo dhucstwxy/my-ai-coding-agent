@@ -69,6 +69,8 @@ export interface ReminderInput {
   catalogText?: string;
   /** Hook 注入的提示词，位于 Skill 目录之后、环境信息之前 */
   hookPrompt?: string;
+  /** 角色目录，位于 Hook 注入之后、工作区信息之前。空则不出现 */
+  agentCatalog?: string;
 }
 
 /** 进入稳定 system 的固定模块（不含环境与可选槽） */

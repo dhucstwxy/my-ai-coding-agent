@@ -4,7 +4,7 @@ import { projectSessionsDir } from "./config/paths.js";
 import { createProvider } from "./provider/factory.js";
 import { SessionStore } from "./session/store.js";
 import { cleanupExpiredSessions } from "./session/cleanup.js";
-import { ChatService, type SkillHost } from "./chat/service.js";
+import { ChatService, type AgentHost, type SkillHost } from "./chat/service.js";
 import { createDefaultRegistry } from "./tools/create-registry.js";
 import { startApp } from "./tui/index.js";
 import { PermissionGate } from "./permission/gate.js";
@@ -33,7 +33,17 @@ import {
   HookSessionState,
   createHookSessions,
   loadHooks,
+  setChildSessionGuard,
+  setSubAgentStarter,
 } from "./hooks/index.js";
+import {
+  AgentCatalog,
+  AgentFatalError,
+  TaskBoard,
+  createAgentTool,
+} from "./agents/index.js";
+import type { AgentToolInput } from "./agents/types.js";
+import type { ToolContext, ToolResult } from "./tools/types.js";
 
 /** 组装依赖并启动 TUI */
 export async function runCli(): Promise<void> {
@@ -110,6 +120,24 @@ export async function runCli(): Promise<void> {
     }),
   );
   const mcp = await connectMcpServers(workspaceRoot, registry);
+  const agentCatalog = new AgentCatalog(workspaceRoot);
+  const agentBoard = new TaskBoard();
+  const agentBridge: {
+    start: (input: AgentToolInput, ctx: ToolContext) => Promise<ToolResult>;
+  } = {
+    start: async () => ({
+      ok: false,
+      content: "子任务尚未就绪",
+      errorCode: "subagent",
+    }),
+  };
+  registry.register(
+    createAgentTool({
+      catalog: agentCatalog,
+      toolNames: () => new Set(registry.list().map((tool) => tool.name)),
+      start: (input, ctx) => agentBridge.start(input, ctx),
+    }),
+  );
   try {
     skillCatalog.refresh(new Set(registry.list().map((tool) => tool.name)));
   } catch (err) {
@@ -143,6 +171,21 @@ export async function runCli(): Promise<void> {
     grants,
     workspaceRoot,
   });
+  try {
+    agentCatalog.refresh(new Set(registry.list().map((tool) => tool.name)));
+  } catch (err) {
+    if (err instanceof AgentFatalError) {
+      console.error(err.message);
+      await mcp.close();
+      process.exit(1);
+    }
+    throw err;
+  }
+  const agentHost: AgentHost = {
+    catalog: agentCatalog,
+    board: agentBoard,
+    providers: loaded.config.providers,
+  };
   const skillHost: SkillHost = {
     catalog: skillCatalog,
     session: skillSession,
@@ -167,7 +210,13 @@ export async function runCli(): Promise<void> {
     },
     skillHost,
     { engine: hookEngine, state: hookState },
+    agentHost,
   );
+  agentBridge.start = (input, ctx) => chat.startAgent(input, ctx);
+  setSubAgentStarter((input) =>
+    chat.startHookAgent(input.sessionId, input.name, input.log),
+  );
+  setChildSessionGuard((id) => agentBoard.isChildSession(id));
 
   console.log(
     `已加载配置（${loaded.source}），供应商：${active.name} / ${active.protocol} / ${active.model}`,
@@ -180,7 +229,10 @@ export async function runCli(): Promise<void> {
     if (!closing) {
       closing = (async () => {
         const id = sessionHooks.current();
-        if (id) await sessionHooks.leave(id);
+        if (id) {
+          chat.stopSubAgents(id);
+          await sessionHooks.leave(id);
+        }
         await mcp.close();
       })();
     }
@@ -206,6 +258,7 @@ export async function runCli(): Promise<void> {
       ...instructions.warnings,
       ...memory.warnings,
       ...skillCatalog.warnings().map((warning) => `${warning.path}：${warning.reason}`),
+      ...agentCatalog.warnings().map((warning) => `${warning.path}：${warning.reason}`),
     ],
     sessionHooks,
   });

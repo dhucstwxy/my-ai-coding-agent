@@ -29,6 +29,11 @@ export interface PermissionCheckInput {
    * 默认档下若没有规则命中，只读调用直接放行而不询问；严格档与放行档不受影响。
    */
   readOnly?: boolean;
+  /**
+   * 省略或 true 时，需要询问就弹出确认。
+   * false 时把询问改成拒绝，不再调用确认器。后台子任务使用。
+   */
+  interactive?: boolean;
 }
 
 export interface PermissionGateDeps {
@@ -45,6 +50,7 @@ export interface PermissionGateDeps {
 export class PermissionGate {
   private readonly rules: PermissionRule[];
   private prompter: PermissionPrompter;
+  private askObserver: { onStart(): void; onEnd(): void } | null = null;
 
   constructor(private readonly deps: PermissionGateDeps) {
     this.rules = [...deps.rules];
@@ -57,6 +63,11 @@ export class PermissionGate {
 
   setPrompter(prompter: PermissionPrompter): void {
     this.prompter = prompter;
+  }
+
+  /** 前台子任务用它暂停计时。权限确认打开期间不计运行时间。 */
+  setAskObserver(observer: { onStart(): void; onEnd(): void } | null): void {
+    this.askObserver = observer;
   }
 
   async check(input: PermissionCheckInput): Promise<PermissionDecision> {
@@ -121,18 +132,27 @@ export class PermissionGate {
     input: PermissionCheckInput,
     subject: string,
   ): Promise<PermissionDecision> {
+    if (input.interactive === false) {
+      return deny("mode", "已拒绝：后台任务不能询问用户，本次调用被拒绝");
+    }
     if (input.signal.isCancelled) {
       return deny("user", "已拒绝：用户拒绝本次调用");
     }
 
-    const choice = await this.prompter.ask(
-      {
-        tool: input.call.name,
-        subject,
-        argsSummary: summarizeArgs(input.call.arguments),
-      },
-      input.signal,
-    );
+    this.askObserver?.onStart();
+    let choice;
+    try {
+      choice = await this.prompter.ask(
+        {
+          tool: input.call.name,
+          subject,
+          argsSummary: summarizeArgs(input.call.arguments),
+        },
+        input.signal,
+      );
+    } finally {
+      this.askObserver?.onEnd();
+    }
 
     if (input.signal.isCancelled || choice === "deny") {
       return deny("user", "已拒绝：用户拒绝本次调用");

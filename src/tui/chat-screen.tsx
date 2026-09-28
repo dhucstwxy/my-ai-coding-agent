@@ -9,7 +9,7 @@ import type {
   PermissionPrompt,
   PermissionPrompter,
 } from "../permission/types.js";
-import type { AgentMode } from "../agent/types.js";
+import type { AgentEvent, AgentMode } from "../agent/types.js";
 import type { SessionStore } from "../session/store.js";
 import type { ChatMessage } from "../session/types.js";
 import { MessageList } from "./message-list.js";
@@ -74,6 +74,25 @@ function permMark(mode: PermissionMode): string {
   return "DEFAULT";
 }
 
+/** 前台子任务按 b 转入后台。确认框打开、或当前没有前台子任务时，b 不做这件事。 */
+export function foregroundDetachKey(input: {
+  promptOpen: boolean;
+  busy: boolean;
+  char: string;
+  ctrl: boolean;
+  meta: boolean;
+  hasForeground: boolean;
+}): boolean {
+  if (input.promptOpen) return false;
+  return (
+    input.busy &&
+    input.char === "b" &&
+    !input.ctrl &&
+    !input.meta &&
+    input.hasForeground
+  );
+}
+
 export function ChatScreen({
   sessionId,
   store,
@@ -85,9 +104,10 @@ export function ChatScreen({
   useEffect(() => {
     void sessionHooks?.enter(sessionId);
     return () => {
+      chat.stopSubAgents(sessionId);
       void sessionHooks?.leave(sessionId);
     };
-  }, [sessionHooks, sessionId]);
+  }, [sessionHooks, sessionId, chat]);
   // 只在挂载时 open 一次。每次渲染都 open 会在「assistant 已写入、tool 结果未齐」时
   // 把未配对尾部截掉并 rewriteAll，会话会被清空到只剩 user。
   const [messages, setMessages] = useState<ChatMessage[]>(
@@ -114,6 +134,10 @@ export function ChatScreen({
   const [completions, setCompletions] = useState<string[]>([]);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  const [runningTasks, setRunningTasks] = useState<string[]>([]);
+  const playRef = useRef<(events: AsyncIterable<AgentEvent>) => Promise<void>>(
+    async () => {},
+  );
   /** /clear 后只显示此下标之后的存档消息 */
   const viewStartRef = useRef(0);
   const promptSessionRef = useRef<PromptSession | null>(null);
@@ -128,6 +152,27 @@ export function ChatScreen({
     if (!session) return;
     chat.attachPrompter(session.prompter);
   }, [chat]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setRunningTasks(
+        chat.listSubAgents(sessionId).map((task) => {
+          const where = task.background ? "后台" : "前台";
+          return `${task.id} ${where}运行中`;
+        }),
+      );
+    }, 400);
+    return () => clearInterval(timer);
+  }, [chat, sessionId]);
+
+  useEffect(() => {
+    chat.setIdleDeliveryHandler((id) => {
+      if (id !== sessionId) return;
+      setBusy(true);
+      void playRef.current(chat.followUp(sessionId));
+    });
+    return () => chat.setIdleDeliveryHandler(null);
+  }, [chat, sessionId]);
 
   function syncMessagesFromStore() {
     const all = store.get(sessionId)?.messages ?? [];
@@ -167,6 +212,19 @@ export function ChatScreen({
         return;
       }
       onBack();
+      return;
+    }
+    if (
+      foregroundDetachKey({
+        promptOpen: false,
+        busy,
+        char,
+        ctrl: Boolean(key.ctrl),
+        meta: Boolean(key.meta),
+        hasForeground: chat.hasForegroundSubAgent(sessionId),
+      })
+    ) {
+      chat.detachForegroundSubAgent(sessionId);
       return;
     }
     if (busy) return;
@@ -231,11 +289,15 @@ export function ChatScreen({
       setMessages((prev) => [...prev, optimisticUser]);
     }
 
+    await play(chat.send(sessionId, text));
+  }
+
+  async function play(events: AsyncIterable<AgentEvent>) {
     let acc = "";
     let thinkingAcc = "";
 
     try {
-      for await (const event of chat.send(sessionId, text)) {
+      for await (const event of events) {
         if (event.type === "mode_changed") {
           setModeMark(agentMark(event.mode));
         }
@@ -359,6 +421,7 @@ export function ChatScreen({
       setBusy(false);
     }
   }
+  playRef.current = play;
 
   const title = store.get(sessionId)?.title ?? "会话";
 
@@ -371,12 +434,17 @@ export function ChatScreen({
         </Text>
       </Text>
       <Text dimColor>
-        Enter 发送；Tab 补全斜杠命令；忙碌时 Esc 取消；空闲 Esc 返回；/help 查看命令
+        Enter 发送；Tab 补全斜杠命令；忙碌时 Esc 取消；前台子任务按 b 转入后台；空闲 Esc 返回
       </Text>
       {progress ? <Text color="blue">{progress}</Text> : null}
       {cacheLine ? <Text dimColor>{cacheLine}</Text> : null}
       {compactLine ? <Text color="yellow">{compactLine}</Text> : null}
       {stopMessage ? <Text color="green">状态：{stopMessage}</Text> : null}
+      {runningTasks.map((line) => (
+        <Text key={line} color="cyan">
+          子任务 {line}
+        </Text>
+      ))}
 
       {warnings.map((w) => (
         <Text key={w} color="yellow">

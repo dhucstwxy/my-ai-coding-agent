@@ -45,6 +45,13 @@ export function permissionSubject(tool: string, args: unknown): SubjectResult {
     return { ok: true, subject: record.path };
   }
 
+  if (tool === "agent") {
+    if (typeof record.task !== "string" || record.task.trim() === "") {
+      return { ok: false, message: "缺少任务说明" };
+    }
+    return { ok: true, subject: record.task.trim() };
+  }
+
   if (tool === "glob_files") {
     if (typeof record.pattern !== "string" || record.pattern.trim() === "") {
       return { ok: false, message: "缺少查找模式" };

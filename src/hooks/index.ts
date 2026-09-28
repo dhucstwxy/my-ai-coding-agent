@@ -1,3 +1,4 @@
+export { setChildSessionGuard, setSubAgentStarter } from "./actions.js";
 export { HookEngine } from "./engine.js";
 export { loadHooks, type LoadHooksOptions } from "./load.js";
 export { createHookSessions, type HookSessions } from "./session.js";

@@ -52,10 +52,31 @@ import {
   type SkillRunDeps,
   type SkillSession,
 } from "../skills/index.js";
+import {
+  AgentFatalError,
+  startSubAgent,
+  stopParentAgents,
+  detachForeground,
+  hasForegroundAgent,
+  type AgentCatalog,
+  type AgentToolInput,
+  type SubAgentDeps,
+  type SubAgentTask,
+} from "../agents/index.js";
+import type { TaskBoard } from "../agents/board.js";
+import type { ToolContext, ToolResult } from "../tools/types.js";
 
 export interface HookHost {
   engine: HookEngine;
   state: HookSessionState;
+}
+
+export interface AgentHost {
+  catalog: AgentCatalog;
+  board: TaskBoard;
+  providers: ProviderConfig[];
+  /** 测试可缩短前台时限。正式运行为 60 秒 */
+  foregroundLimitMs?: number;
 }
 
 export interface SkillHost {
@@ -85,6 +106,11 @@ export class ChatService {
   private readonly lastTokenUsage = new Map<string, TokenUsageInfo>();
   private hookEngine: HookEngine | null = null;
   private hookState: HookSessionState | null = null;
+  private agents: AgentHost | null = null;
+  private loopDepth = 0;
+  private delivering = false;
+  private agentWarningKey = "";
+  private idleDelivery: ((sessionId: string) => void) | null = null;
 
   constructor(
     private readonly store: SessionStore,
@@ -99,6 +125,7 @@ export class ChatService {
     promptContext: AgentPromptContext = {},
     private readonly skills?: SkillHost,
     hooks?: HookHost,
+    agents?: AgentHost,
   ) {
     this.workspaceRoot = workspaceRoot;
     this.provider = provider;
@@ -142,6 +169,10 @@ export class ChatService {
           );
         });
       });
+    }
+    if (agents) {
+      this.agents = agents;
+      this.loop.setAgentCatalog(() => this.agents?.catalog.catalogText() ?? "");
     }
   }
 
@@ -528,34 +559,220 @@ export class ChatService {
     yield { type: "done" };
   }
 
+  listSubAgents(sessionId: string): SubAgentTask[] {
+    return this.agents?.board.listRunning(sessionId) ?? [];
+  }
+
+  hasForegroundSubAgent(sessionId: string): boolean {
+    return hasForegroundAgent(sessionId);
+  }
+
+  detachForegroundSubAgent(sessionId: string): void {
+    detachForeground(sessionId);
+  }
+
+  /** 离开会话或进程退出：停掉名下子任务并丢掉待送回结果。 */
+  stopSubAgents(sessionId: string): void {
+    stopParentAgents(sessionId);
+    this.agents?.board.clearParent(sessionId);
+  }
+
+  setIdleDeliveryHandler(handler: ((sessionId: string) => void) | null): void {
+    this.idleDelivery = handler;
+  }
+
+  /** 父循环空闲时，把已经写好的结果接着跑一轮。 */
+  async *followUp(sessionId: string): AsyncIterable<AgentEvent> {
+    yield* this.drainDeliveries(sessionId);
+  }
+
+  /** 委派工具入口。启动前失败不建任务。 */
+  startAgent(input: AgentToolInput, ctx: ToolContext): Promise<ToolResult> {
+    if (!this.agents) {
+      return Promise.resolve({
+        ok: false,
+        content: "子任务尚未就绪",
+        errorCode: "subagent",
+      });
+    }
+    if (!ctx.sessionId) {
+      return Promise.resolve({
+        ok: false,
+        content: "当前没有会话，无法派生子任务",
+        errorCode: "invalid_args",
+      });
+    }
+    return startSubAgent(this.subAgentDeps(), {
+      kind: input.type,
+      task: input.task,
+      ...(input.name ? { roleName: input.name } : {}),
+      background: input.background ?? false,
+      notify: "parent",
+      parentSessionId: ctx.sessionId,
+    });
+  }
+
+  /**
+   * Hook 的 subagent 动作。只启动定义式并转入后台，最终答复只记日志。
+   * 调用方要先确认这不是子会话。
+   */
+  async startHookAgent(
+    sessionId: string,
+    name: string,
+    log: (line: string) => void,
+  ): Promise<void> {
+    if (!this.agents) {
+      log(`[hook] 子代理尚未实现：${name}`);
+      return;
+    }
+    this.refreshAgents();
+    const role = this.agents.catalog.get(name);
+    if (!role) {
+      log(`[hook] 找不到角色：${name}`);
+      return;
+    }
+    const result = await startSubAgent(this.subAgentDeps(), {
+      kind: "defined",
+      task: role.description?.trim() || "请遵循系统提示完成任务。",
+      roleName: role.name,
+      background: true,
+      notify: "log",
+      parentSessionId: sessionId,
+      log,
+    });
+    if (!result.ok) log(`[hook] ${result.content}`);
+  }
+
+  private subAgentDeps(): SubAgentDeps {
+    const agents = this.agents;
+    if (!agents) {
+      throw new Error("子任务尚未就绪");
+    }
+    return {
+      workspaceRoot: this.workspaceRoot,
+      catalog: agents.catalog,
+      board: agents.board,
+      registry: this.toolRegistry,
+      gate: this.gate,
+      permissionModes: this.permissionModes,
+      providers: agents.providers,
+      parentProvider: this.provider,
+      parentConfig: this.providerConfig,
+      loopOptions: this.loopOptions,
+      hookEngine: this.hookEngine,
+      hookState: this.hookState,
+      getSnapshot: () => this.loop.getRequestSnapshot(),
+      getParentCancel: () => this.currentCancel,
+      parentPermissionMode: (sessionId) => this.permissionModes.get(sessionId),
+      onBackgroundFinished: (parentSessionId) => {
+        if (this.loopDepth === 0 && !this.delivering) {
+          this.idleDelivery?.(parentSessionId);
+        }
+      },
+      ...(agents.foregroundLimitMs !== undefined
+        ? { foregroundLimitMs: agents.foregroundLimitMs }
+        : {}),
+    };
+  }
+
+  /** 进入主循环前重新读取角色。同层重名或未知工具会退出进程。 */
+  private refreshAgents(): string {
+    if (!this.agents) return "";
+    try {
+      this.agents.catalog.refresh(
+        new Set(this.toolRegistry.list().map((tool) => tool.name)),
+      );
+    } catch (err) {
+      if (err instanceof AgentFatalError) {
+        console.error(err.message);
+        process.exit(1);
+      }
+      throw err;
+    }
+    const text = this.agents.catalog
+      .warnings()
+      .map((warning) => `${warning.path}：${warning.reason}`)
+      .join("\n");
+    if (!text || text === this.agentWarningKey) return "";
+    this.agentWarningKey = text;
+    return text;
+  }
+
   private async *runLoop(
     sessionId: string,
     userText: string,
   ): AsyncIterable<AgentEvent> {
+    const warning = this.refreshAgents();
+    if (warning) yield { type: "ui_message", text: warning };
     const cancel = createCancelToken();
     this.currentCancel = cancel;
     const mode = this.planModes.getMode(sessionId);
+    this.loopDepth += 1;
     try {
       for await (const event of this.loop.run(sessionId, userText, {
         cancel,
         mode,
       })) {
-        if (event.type === "token_usage") {
-          this.lastTokenUsage.set(sessionId, {
-            inputTokens: event.inputTokens,
-            outputTokens: event.outputTokens,
-            cacheHitTokens: event.cacheHitTokens,
-            cacheMissTokens: event.cacheMissTokens,
-            cacheAvailable: event.cacheAvailable,
-          });
-        }
+        this.noteUsage(sessionId, event);
         yield event;
       }
     } finally {
+      this.loopDepth -= 1;
       if (this.currentCancel === cancel) {
         this.currentCancel = null;
       }
     }
+    yield* this.drainDeliveries(sessionId);
+  }
+
+  private noteUsage(sessionId: string, event: AgentEvent): void {
+    if (event.type !== "token_usage") return;
+    this.lastTokenUsage.set(sessionId, {
+      inputTokens: event.inputTokens,
+      outputTokens: event.outputTokens,
+      cacheHitTokens: event.cacheHitTokens,
+      cacheMissTokens: event.cacheMissTokens,
+      cacheAvailable: event.cacheAvailable,
+    });
+  }
+
+  /**
+   * 把待送回的正文各写一条用户消息，再续跑一轮，不再写第二遍。
+   * 这一轮里新到的结果留到本轮结束后再送。
+   */
+  private async *drainDeliveries(sessionId: string): AsyncIterable<AgentEvent> {
+    if (!this.agents || this.delivering) return;
+    const texts = this.agents.board.drain(sessionId);
+    if (texts.length === 0) return;
+    this.delivering = true;
+    this.loopDepth += 1;
+    const cancel = createCancelToken();
+    this.currentCancel = cancel;
+    try {
+      for (const text of texts) {
+        this.store.appendMessage(sessionId, {
+          id: randomUUID(),
+          role: "user",
+          content: text,
+          createdAt: new Date().toISOString(),
+        });
+      }
+      for await (const event of this.loop.run(sessionId, "", {
+        cancel,
+        mode: this.planModes.getMode(sessionId),
+        skipUserAppend: true,
+      })) {
+        this.noteUsage(sessionId, event);
+        yield event;
+      }
+    } finally {
+      this.loopDepth -= 1;
+      this.delivering = false;
+      if (this.currentCancel === cancel) {
+        this.currentCancel = null;
+      }
+    }
+    yield* this.drainDeliveries(sessionId);
   }
 }
 
