@@ -1,0 +1,14 @@
+{
+  "name": "@mewcode-eval/code-edit-003",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.5"
+  }
+}

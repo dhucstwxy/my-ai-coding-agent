@@ -1,4 +1,6 @@
 node_modules/
+tests/eval/fixtures/**/node_modules/
+tests/eval/runs/
 dist/
 .mewcode/config.yaml
 .mewcode/permissions.local.yaml

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "tsx src/index.ts",
+    "eval": "tsx src/index.ts eval",
     "typecheck": "tsc --noEmit"
   },
   "author": "xingyu.wang",
