@@ -50,8 +50,28 @@ export function validateConfig(raw: unknown): {
     );
   }
 
+  let teams: AppConfig["teams"];
+  if (obj.teams !== undefined) {
+    if (!obj.teams || typeof obj.teams !== "object" || Array.isArray(obj.teams)) {
+      throw new ConfigError("teams 必须是对象");
+    }
+    const t = obj.teams as Record<string, unknown>;
+    if (t.coordinatorAvailable !== undefined) {
+      if (typeof t.coordinatorAvailable !== "boolean") {
+        throw new ConfigError("teams.coordinatorAvailable 必须是布尔值");
+      }
+      teams = { coordinatorAvailable: t.coordinatorAvailable };
+    } else {
+      teams = {};
+    }
+  }
+
   return {
-    config: { activeProvider: active, providers },
+    config: {
+      activeProvider: active,
+      providers,
+      ...(teams ? { teams } : {}),
+    },
     warnings,
   };
 }

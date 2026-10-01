@@ -71,6 +71,8 @@ export interface ReminderInput {
   hookPrompt?: string;
   /** 角色目录，位于 Hook 注入之后、工作区信息之前。空则不出现 */
   agentCatalog?: string;
+  /** 活跃小组与 Coordinator 状态，位于环境信息之前 */
+  teamStatus?: string;
 }
 
 /** 进入稳定 system 的固定模块（不含环境与可选槽） */

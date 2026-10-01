@@ -22,6 +22,8 @@ export interface AgentRecord {
   /** 省略则用主对话的轮次上限。写了则是正整数 */
   maxTurns?: number;
   permission?: PermissionMode;
+  /** 仅支持字面量 worktree；省略表示与主区共用工作区 */
+  isolation?: "worktree";
   body: string;
   scope: AgentScope;
   path: string;
@@ -60,6 +62,10 @@ export interface SubAgentTask {
   usage: SubAgentUsage;
   /** 前台实际运行毫秒。权限确认期间不增加 */
   runningMs: number;
+  /** isolation: worktree 时由系统生成的逻辑名 */
+  worktreeName?: string;
+  /** isolation: worktree 时的隔离目录绝对路径 */
+  worktreePath?: string;
 }
 
 export interface AgentWarning {

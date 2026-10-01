@@ -4,5 +4,6 @@ dist/
 .mewcode/permissions.local.yaml
 .mewcode/hooks.local.yaml
 .mewcode/sessions/
+.mewcode/worktrees/
 *.log
 .DS_Store

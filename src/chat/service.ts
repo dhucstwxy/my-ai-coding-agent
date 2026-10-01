@@ -65,6 +65,7 @@ import {
 } from "../agents/index.js";
 import type { TaskBoard } from "../agents/board.js";
 import type { ToolContext, ToolResult } from "../tools/types.js";
+import type { WorktreeService } from "../worktree/index.js";
 
 export interface HookHost {
   engine: HookEngine;
@@ -77,6 +78,8 @@ export interface AgentHost {
   providers: ProviderConfig[];
   /** 测试可缩短前台时限。正式运行为 60 秒 */
   foregroundLimitMs?: number;
+  /** Git Worktree 隔离服务；未注入时 isolation: worktree 会启动失败 */
+  worktrees?: WorktreeService;
 }
 
 export interface SkillHost {
@@ -672,6 +675,7 @@ export class ChatService {
       ...(agents.foregroundLimitMs !== undefined
         ? { foregroundLimitMs: agents.foregroundLimitMs }
         : {}),
+      ...(agents.worktrees ? { worktrees: agents.worktrees } : {}),
     };
   }
 

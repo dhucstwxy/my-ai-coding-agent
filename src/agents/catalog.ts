@@ -206,6 +206,14 @@ function parseAgentFile(
     permission = obj.permission as PermissionMode;
   }
 
+  let isolation: "worktree" | undefined;
+  if (obj.isolation !== undefined) {
+    if (obj.isolation !== "worktree") {
+      return { warning: { path: filePath, reason: "isolation 不合法" } };
+    }
+    isolation = "worktree";
+  }
+
   return {
     record: {
       name,
@@ -215,6 +223,7 @@ function parseAgentFile(
       ...(model ? { model } : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(permission ? { permission } : {}),
+      ...(isolation ? { isolation } : {}),
       body,
       scope,
       path: filePath,

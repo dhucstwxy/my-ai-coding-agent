@@ -41,6 +41,10 @@ import { DEFAULT_AGENT_OPTIONS, isPermissionErrorCode } from "./types.js";
 export interface AgentPromptContext {
   customInstructions?: string;
   memoryText?: string;
+  /** 主循环工具列表后处理（如 Coordinator 去掉写工具） */
+  filterLeadTools?: (tools: ToolDefinition[]) => ToolDefinition[];
+  /** 活跃小组与 Coordinator 状态，进入环境提醒 */
+  teamStatusText?: () => string;
 }
 
 /** 每轮向主循环提供 Skill 提醒、工具视图和模型 */
@@ -258,13 +262,16 @@ export class AgentLoop {
       }
       const thinking =
         Boolean(providerConfig.thinking) && provider.supportsThinking;
-      const tools =
+      let tools =
         opts.toolsOverride ??
         (this.skillContext
           ? this.definitionsFor(
               this.skillContext.visibleNames(skillSessionId, opts.mode),
             )
           : filterToolsForMode(this.registry, opts.mode));
+      if (!opts.toolsOverride && this.promptContext.filterLeadTools) {
+        tools = this.promptContext.filterLeadTools(tools);
+      }
 
       let requestSystem: string;
       let reminderMessages: ChatMessage[];
@@ -308,6 +315,7 @@ export class AgentLoop {
           pinnedText: this.skillContext?.pinnedText(skillSessionId),
           catalogText: this.skillContext?.catalogText(),
           agentCatalog: this.agentCatalogText(),
+          teamStatus: this.promptContext.teamStatusText?.(),
         }).map((r) => ({
           id: randomUUID(),
           role: "user" as const,

@@ -66,6 +66,11 @@ export function projectAgentsDir(cwd = process.cwd()): string {
   return path.join(cwd, ".mewcode", "agents");
 }
 
+/** 项目 Worktree 目录：<cwd>/.mewcode/worktrees */
+export function projectWorktreesDir(cwd = process.cwd()): string {
+  return path.join(cwd, ".mewcode", "worktrees");
+}
+
 /** @deprecated 旧全局会话目录，本章起不再作为主存储 */
 export function sessionsDir(home = os.homedir()): string {
   return path.join(home, ".mewcode", "sessions");

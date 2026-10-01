@@ -13,10 +13,16 @@ export interface ProviderConfig {
   contextWindow?: number;
 }
 
+export interface TeamsConfig {
+  /** Coordinator 能力开关；还需环境变量 MEWCODE_COORDINATOR 才生效 */
+  coordinatorAvailable?: boolean;
+}
+
 export interface AppConfig {
   /** 当前启用的供应商标识，对应 ProviderConfig.name */
   activeProvider: string;
   providers: ProviderConfig[];
+  teams?: TeamsConfig;
 }
 
 export interface LoadConfigResult {

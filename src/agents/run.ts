@@ -30,6 +30,10 @@ import type {
   SubAgentStatus,
   SubAgentTask,
 } from "./types.js";
+import {
+  generateAgentWorktreeName,
+  type WorktreeService,
+} from "../worktree/index.js";
 
 /** 前台实际运行达到此时长就转入后台。权限确认期间不计。 */
 export const FOREGROUND_LIMIT_MS = 60_000;
@@ -52,6 +56,7 @@ export interface SubAgentDeps {
   parentPermissionMode: (sessionId: string) => PermissionMode;
   onBackgroundFinished: (parentSessionId: string) => void;
   foregroundLimitMs?: number;
+  worktrees?: WorktreeService;
 }
 
 export interface StartSubAgentInput {
@@ -102,34 +107,60 @@ export function stopParentAgents(parentSessionId: string): void {
  * 启动子任务。启动前的失败不建任务。
  * 前台会等到子任务停止调用工具，或转入后台。后台立刻返回任务编号。
  */
-export function startSubAgent(
+export async function startSubAgent(
   deps: SubAgentDeps,
   input: StartSubAgentInput,
 ): Promise<ToolResult> {
   const taskText = input.task.trim();
   if (!taskText) {
-    return Promise.resolve(fail("任务说明不能为空"));
+    return fail("任务说明不能为空");
   }
 
   const runsInBackground = input.kind === "fork" || input.background;
   if (!runsInBackground && hasForegroundAgent(input.parentSessionId)) {
-    return Promise.resolve(fail("已有前台子任务在运行"));
+    return fail("已有前台子任务在运行");
   }
 
   let role: AgentRecord | undefined;
   if (input.kind === "defined") {
     const name = input.roleName?.trim().toLowerCase() ?? "";
-    if (!name) return Promise.resolve(fail("找不到角色"));
+    if (!name) return fail("找不到角色");
     role = deps.catalog.get(name);
-    if (!role) return Promise.resolve(fail(`找不到角色：${name}`));
+    if (!role) return fail(`找不到角色：${name}`);
     if (role.model && !deps.providers.some((item) => item.model === role!.model)) {
-      return Promise.resolve(fail(`找不到模型：${role.model}`));
+      return fail(`找不到模型：${role.model}`);
     }
   }
 
   const snapshot = input.kind === "fork" ? deps.getSnapshot() : null;
   if (input.kind === "fork" && !snapshot) {
-    return Promise.resolve(fail("没有可继承的对话快照"));
+    return fail("没有可继承的对话快照");
+  }
+
+  let worktreeName: string | undefined;
+  let worktreePath: string | undefined;
+  if (input.kind === "defined" && role?.isolation === "worktree") {
+    if (!deps.worktrees) {
+      return fail("工作目录隔离服务未就绪");
+    }
+    try {
+      worktreeName = generateAgentWorktreeName(role.name);
+      await deps.worktrees.create(worktreeName);
+      const info = deps.worktrees.enter(worktreeName);
+      worktreePath = info.path;
+    } catch (err) {
+      if (worktreeName && deps.worktrees) {
+        try {
+          deps.worktrees.exit(worktreeName);
+          await deps.worktrees.remove(worktreeName);
+        } catch {
+          // 启动失败时尽量清掉半成品
+        }
+      }
+      return fail(
+        `无法建立隔离工作目录：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   const allTools = deps.registry.toDefinitions();
@@ -158,6 +189,7 @@ export function startSubAgent(
     }
   }
 
+  const childRoot = worktreePath ?? deps.workspaceRoot;
   const task = deps.board.create({
     parentSessionId: input.parentSessionId,
     childSessionId: child.id,
@@ -165,6 +197,8 @@ export function startSubAgent(
     ...(role ? { roleName: role.name } : {}),
     background: runsInBackground,
     notify: input.notify,
+    ...(worktreeName ? { worktreeName } : {}),
+    ...(worktreePath ? { worktreePath } : {}),
   });
 
   const childCancel = createCancelToken();
@@ -206,7 +240,7 @@ export function startSubAgent(
 
   if (runsInBackground) {
     void runChild();
-    return Promise.resolve({ ok: true, content: backgroundText(task.id) });
+    return { ok: true, content: backgroundText(task.id) };
   }
   return new Promise((resolve) => {
     resolveForeground = resolve;
@@ -292,7 +326,7 @@ export function startSubAgent(
         resolved.provider,
         resolved.config,
         deps.registry,
-        deps.workspaceRoot,
+        childRoot,
         deps.gate,
         deps.loopOptions,
         pipeline,
@@ -300,8 +334,11 @@ export function startSubAgent(
       if (deps.hookEngine && deps.hookState) {
         loop.setHooks(deps.hookEngine, deps.hookState);
       }
-      const system =
+      let system =
         input.kind === "fork" ? (snapshot?.system ?? "") : (role?.body ?? "");
+      if (worktreePath && input.kind === "defined") {
+        system = `${system}\n\n你当前在独立 Git 工作目录中工作。所有文件与命令操作都相对于该目录，不要假设主仓库工作区：\n${worktreePath}`;
+      }
       for await (const event of loop.run(child.id, taskText, {
         cancel: childCancel,
         mode: "execute",
@@ -333,6 +370,7 @@ export function startSubAgent(
       deps.hookState?.clear(child.id);
       fs.rmSync(dir, { recursive: true, force: true });
       controls.delete(task.id);
+      await releaseWorktree(deps, task);
     }
 
     if (dropped || deps.board.get(task.id)?.status === "cancelled") {
@@ -367,6 +405,24 @@ export function startSubAgent(
     }
     deps.board.enqueue(input.parentSessionId, deliveryText(latest));
     deps.onBackgroundFinished(input.parentSessionId);
+  }
+}
+
+async function releaseWorktree(
+  deps: SubAgentDeps,
+  task: SubAgentTask,
+): Promise<void> {
+  const name = task.worktreeName;
+  if (!name || !deps.worktrees) return;
+  try {
+    deps.worktrees.exit(name);
+    const dirty = await deps.worktrees.isDirty(name);
+    if (dirty.blocked) return;
+    await deps.worktrees.remove(name);
+  } catch (err) {
+    console.error(
+      `[worktree] 子任务结束后清理失败 ${name}：${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 

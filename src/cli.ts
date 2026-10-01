@@ -44,6 +44,15 @@ import {
 } from "./agents/index.js";
 import type { AgentToolInput } from "./agents/types.js";
 import type { ToolContext, ToolResult } from "./tools/types.js";
+import { WorktreeService, startWorktreeJanitor } from "./worktree/index.js";
+import {
+  TeamStore,
+  MemberRunner,
+  createLeadTeamTools,
+  filterBaseToolsForLead,
+  isCoordinatorActive,
+  coordinatorStatusText,
+} from "./team/index.js";
 
 /** 组装依赖并启动 TUI */
 export async function runCli(): Promise<void> {
@@ -122,6 +131,23 @@ export async function runCli(): Promise<void> {
   const mcp = await connectMcpServers(workspaceRoot, registry);
   const agentCatalog = new AgentCatalog(workspaceRoot);
   const agentBoard = new TaskBoard();
+  const worktrees = new WorktreeService(workspaceRoot);
+  const worktreeJanitor = startWorktreeJanitor(worktrees);
+  const teamStore = new TeamStore();
+  const memberRunner = new MemberRunner(teamStore, {
+    repoRoot: workspaceRoot,
+    worktrees,
+  });
+  const teamHost = {
+    store: teamStore,
+    runner: memberRunner,
+    worktrees,
+    repoRoot: workspaceRoot,
+    config: loaded.config,
+  };
+  for (const tool of createLeadTeamTools(teamHost)) {
+    registry.register(tool);
+  }
   const agentBridge: {
     start: (input: AgentToolInput, ctx: ToolContext) => Promise<ToolResult>;
   } = {
@@ -185,6 +211,7 @@ export async function runCli(): Promise<void> {
     catalog: agentCatalog,
     board: agentBoard,
     providers: loaded.config.providers,
+    worktrees,
   };
   const skillHost: SkillHost = {
     catalog: skillCatalog,
@@ -207,6 +234,18 @@ export async function runCli(): Promise<void> {
     {
       customInstructions: instructions.text || undefined,
       memoryText: memory.text || undefined,
+      filterLeadTools: (tools) =>
+        filterBaseToolsForLead(tools, isCoordinatorActive(loaded.config)),
+      teamStatusText: () => {
+        const lines = [coordinatorStatusText(loaded.config)];
+        const activeTeam = teamStore.active();
+        if (activeTeam) {
+          lines.unshift(`活跃小组：${activeTeam.name}（${activeTeam.rootPath}）`);
+        } else {
+          lines.unshift("活跃小组：无");
+        }
+        return lines.join("\n");
+      },
     },
     skillHost,
     { engine: hookEngine, state: hookState },
@@ -228,6 +267,7 @@ export async function runCli(): Promise<void> {
   const shutdown = () => {
     if (!closing) {
       closing = (async () => {
+        worktreeJanitor.stop();
         const id = sessionHooks.current();
         if (id) {
           chat.stopSubAgents(id);

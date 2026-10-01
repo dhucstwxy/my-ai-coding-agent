@@ -23,10 +23,12 @@ function environmentBody(input: ReminderInput): string {
   const catalog = input.catalogText?.trim();
   const hookPrompt = input.hookPrompt?.trim();
   const agentCatalog = input.agentCatalog?.trim();
+  const teamStatus = input.teamStatus?.trim();
   if (pinned) parts.push(pinned);
   if (catalog) parts.push(catalog);
   if (hookPrompt) parts.push(hookPrompt);
   if (agentCatalog) parts.push(agentCatalog);
+  if (teamStatus) parts.push(teamStatus);
   parts.push(base);
   return parts.join("\n\n");
 }
