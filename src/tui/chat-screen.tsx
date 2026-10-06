@@ -140,6 +140,10 @@ export function ChatScreen({
   );
   /** /clear 后只显示此下标之后的存档消息 */
   const viewStartRef = useRef(0);
+  /** 递增后 Static 重新挂载，避免 /clear 后旧行仍占滚动区 */
+  const [staticEpoch, setStaticEpoch] = useState(0);
+  const titleRef = useRef(store.get(sessionId)?.title ?? "会话");
+  const [title, setTitle] = useState(titleRef.current);
   const promptSessionRef = useRef<PromptSession | null>(null);
   if (!promptSessionRef.current) {
     promptSessionRef.current = createPromptSession(setPendingPrompt);
@@ -155,13 +159,16 @@ export function ChatScreen({
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setRunningTasks(
-        chat.listSubAgents(sessionId).map((task) => {
-          const where = task.background ? "后台" : "前台";
-          return `${task.id} ${where}运行中`;
-        }),
+      const next = chat.listSubAgents(sessionId).map((task) => {
+        const where = task.background ? "后台" : "前台";
+        return `${task.id} ${where}运行中`;
+      });
+      setRunningTasks((prev) =>
+        prev.length === next.length && prev.every((line, i) => line === next[i])
+          ? prev
+          : next,
       );
-    }, 400);
+    }, 1000);
     return () => clearInterval(timer);
   }, [chat, sessionId]);
 
@@ -175,8 +182,14 @@ export function ChatScreen({
   }, [chat, sessionId]);
 
   function syncMessagesFromStore() {
-    const all = store.get(sessionId)?.messages ?? [];
+    const session = store.get(sessionId);
+    const all = session?.messages ?? [];
     setMessages(all.slice(viewStartRef.current));
+    const nextTitle = session?.title ?? "会话";
+    if (nextTitle !== titleRef.current) {
+      titleRef.current = nextTitle;
+      setTitle(nextTitle);
+    }
   }
 
   useInput((char, key) => {
@@ -295,6 +308,23 @@ export function ChatScreen({
   async function play(events: AsyncIterable<AgentEvent>) {
     let acc = "";
     let thinkingAcc = "";
+    let streamTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingStream: string | undefined;
+
+    const flushStream = () => {
+      streamTimer = null;
+      if (pendingStream !== undefined) {
+        setStreamingText(pendingStream);
+        pendingStream = undefined;
+      }
+    };
+
+    const scheduleStream = (text: string) => {
+      pendingStream = text;
+      if (streamTimer === null) {
+        streamTimer = setTimeout(flushStream, 80);
+      }
+    };
 
     try {
       for await (const event of events) {
@@ -311,6 +341,7 @@ export function ChatScreen({
           viewStartRef.current =
             store.get(sessionId)?.messages.length ?? 0;
           setMessages([]);
+          setStaticEpoch((n) => n + 1);
           setCommandOutput(undefined);
         }
         if (event.type === "permission_denied") {
@@ -358,6 +389,7 @@ export function ChatScreen({
         if (event.type === "agent_progress") {
           setProgress(`迭代 ${event.iteration}/${event.maxIterations}`);
           acc = "";
+          pendingStream = undefined;
           setStreamingText("");
         }
         if (event.type === "agent_stopped") {
@@ -368,9 +400,9 @@ export function ChatScreen({
         }
         if (event.type === "thinking_delta") {
           thinkingAcc += event.text;
-          setThinkingLabel(
-            `思考中…（摘要预览：${thinkingAcc.replace(/\s+/g, " ").trim().slice(0, 40)}…）`,
-          );
+          const preview = thinkingAcc.replace(/\s+/g, " ").trim().slice(0, 40);
+          const label = `思考中…（摘要预览：${preview}…）`;
+          setThinkingLabel((prev) => (prev === label ? prev : label));
         }
         if (event.type === "thinking_end") {
           setThinkingLabel(`思考摘要：${event.summary}`);
@@ -384,6 +416,7 @@ export function ChatScreen({
           );
           syncMessagesFromStore();
           acc = "";
+          pendingStream = undefined;
           setStreamingText(undefined);
         }
         if (event.type === "tool_execution_end") {
@@ -392,20 +425,27 @@ export function ChatScreen({
           );
           syncMessagesFromStore();
           acc = "";
+          pendingStream = undefined;
           setStreamingText("");
         }
         if (event.type === "text_delta") {
           acc += event.text;
-          setStreamingText(acc);
+          scheduleStream(acc);
         }
         if (event.type === "error") {
           setError(event.message);
+          pendingStream = undefined;
           setStreamingText(undefined);
           setThinkingLabel(undefined);
           setToolStatus(undefined);
           syncMessagesFromStore();
         }
         if (event.type === "done") {
+          if (streamTimer) {
+            clearTimeout(streamTimer);
+            streamTimer = null;
+          }
+          flushStream();
           syncMessagesFromStore();
           setStreamingText(undefined);
           setThinkingLabel(undefined);
@@ -418,15 +458,23 @@ export function ChatScreen({
       setStreamingText(undefined);
       setToolStatus(undefined);
     } finally {
+      if (streamTimer) clearTimeout(streamTimer);
       setBusy(false);
     }
   }
   playRef.current = play;
 
-  const title = store.get(sessionId)?.title ?? "会话";
-
   return (
-    <Box flexDirection="column">
+    <>
+      <MessageList
+        messages={messages}
+        staticEpoch={staticEpoch}
+        streamingText={streamingText}
+        thinkingLabel={thinkingLabel}
+        toolStatus={toolStatus}
+      />
+
+      <Box flexDirection="column">
       <Text bold>
         MewCode — {title}{" "}
         <Text color="magenta">
@@ -451,15 +499,6 @@ export function ChatScreen({
           警告：{w}
         </Text>
       ))}
-
-      <Box marginY={1} flexDirection="column">
-        <MessageList
-          messages={messages}
-          streamingText={streamingText}
-          thinkingLabel={thinkingLabel}
-          toolStatus={toolStatus}
-        />
-      </Box>
 
       {commandOutput ? (
         <Box marginBottom={1} flexDirection="column">
@@ -489,6 +528,7 @@ export function ChatScreen({
         <Text>{pendingPrompt ? "" : input}</Text>
         {!busy && !pendingPrompt ? <Text dimColor>█</Text> : null}
       </Box>
-    </Box>
+      </Box>
+    </>
   );
 }

@@ -50,9 +50,52 @@ python scripts/select-swe-multilang-20.py --gold path/to/gold_patch_evaluated_in
 
 ## Gold 过滤说明
 
-正式评测前，建议用官方脚本对目标 split 跑 gold patch，将通过列表传给 `--gold`，再重新生成清单（`goldFiltered=true`）。
+正式评测前，建议对本机跑 gold patch，去掉环境跑不通的题。
 
-无 gold 文件时仍可生成候选 ID，但跨机器可跑性不保证。
+### 一键脚本（推荐）
+
+先 clone 官方仓库到本仓库同级目录：
+
+```bash
+cd ..
+git clone https://github.com/microsoft/SWE-bench-Live.git
+cd SWE-bench-Live
+python -m pip install -e .
+```
+
+回到 MewCode 仓库根目录：
+
+```bash
+# 冒烟：只跑 1 题
+python scripts/run-swe-gold-filter.py --smoke jhlywa__chess.js-546
+
+# 对冻结的 20 题跑 gold（串行，很慢，需 Docker + 大磁盘）
+python scripts/run-swe-gold-filter.py
+
+# gold 通过后，用通过列表重抽（若某语言通过数不足配额会失败）
+python scripts/run-swe-gold-filter.py --reselect
+# 或手动：
+python scripts/select-swe-multilang-20.py --gold tests/eval/swe-multilang/logs/gold/gold-passed-ids.txt
+```
+
+输出目录默认：`tests/eval/swe-multilang/logs/gold/`  
+其中 `gold-passed-ids.txt` / `gold_patch_evaluated_instances.jsonl` 为通过列表。
+
+### Windows 主机注意
+
+在 Windows 上跑 Linux 评测容器时，官方 `launch` 有两处需本地补丁（已在同级 `../SWE-bench-Live` 修过）：
+
+1. `apply_patch` 容器路径不要用 `os.path.join`（会插入 `\`）
+2. 写 `.diff` 时用 `newline="\n"`，避免 CRLF 破坏 `git apply`
+
+若 `docker pull starryzhang/sweb.eval.*` 大层长时间卡住，可改走本地代理 + crane：
+
+```bash
+set HTTPS_PROXY=http://127.0.0.1:7892
+python scripts/pull-swe-images-crane.py
+```
+
+无 gold 文件时仍可生成候选 ID，但跨机器可跑性不保证。官方建议 gold 跑 3 次以过滤不稳定实例。
 
 ## 与 Track A 的关系
 

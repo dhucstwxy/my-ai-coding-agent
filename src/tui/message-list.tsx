@@ -1,9 +1,11 @@
 import React from "react";
-import { Box, Text } from "ink";
+import { Box, Static, Text } from "ink";
 import type { ChatMessage } from "../session/types.js";
 
 export interface MessageListProps {
   messages: ChatMessage[];
+  /** /clear 等需要丢弃已打印 Static 行时递增 */
+  staticEpoch?: number;
   /** 正在流式输出的助手正文 */
   streamingText?: string;
   /** 流式中的思考摘要/状态 */
@@ -12,44 +14,52 @@ export interface MessageListProps {
   toolStatus?: string;
 }
 
+/** 已完成的消息：写入 Static 后不再随流式重绘 */
+export function CommittedMessage({ message: m }: { message: ChatMessage }) {
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text bold color={roleColor(m.role)}>
+        {roleLabel(m)}
+      </Text>
+      {m.thinkingSummary ? (
+        <Text dimColor>思考摘要：{m.thinkingSummary}</Text>
+      ) : null}
+      {m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0
+        ? m.toolCalls.map((tc) => (
+            <Text key={tc.id} dimColor color="magenta">
+              工具调用：{tc.name}
+              {tc.ignored ? "（已忽略）" : ""}
+              {" — "}
+              {typeof tc.arguments === "string"
+                ? tc.arguments.slice(0, 120)
+                : JSON.stringify(tc.arguments).slice(0, 120)}
+            </Text>
+          ))
+        : null}
+      {m.role === "tool" ? (
+        <Text color={m.isError ? "red" : "gray"}>
+          {m.isError ? "失败" : "成功"}：{m.content.slice(0, 300)}
+          {m.content.length > 300 ? "…" : ""}
+        </Text>
+      ) : m.content ? (
+        <Text>{m.content}</Text>
+      ) : null}
+    </Box>
+  );
+}
+
 export function MessageList({
   messages,
+  staticEpoch = 0,
   streamingText,
   thinkingLabel,
   toolStatus,
 }: MessageListProps) {
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      {messages.map((m) => (
-        <Box key={m.id} flexDirection="column" marginBottom={1}>
-          <Text bold color={roleColor(m.role)}>
-            {roleLabel(m)}
-          </Text>
-          {m.thinkingSummary ? (
-            <Text dimColor>思考摘要：{m.thinkingSummary}</Text>
-          ) : null}
-          {m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0
-            ? m.toolCalls.map((tc) => (
-                <Text key={tc.id} dimColor color="magenta">
-                  工具调用：{tc.name}
-                  {tc.ignored ? "（已忽略）" : ""}
-                  {" — "}
-                  {typeof tc.arguments === "string"
-                    ? tc.arguments.slice(0, 120)
-                    : JSON.stringify(tc.arguments).slice(0, 120)}
-                </Text>
-              ))
-            : null}
-          {m.role === "tool" ? (
-            <Text color={m.isError ? "red" : "gray"}>
-              {m.isError ? "失败" : "成功"}：{m.content.slice(0, 300)}
-              {m.content.length > 300 ? "…" : ""}
-            </Text>
-          ) : (
-            m.content ? <Text>{m.content}</Text> : null
-          )}
-        </Box>
-      ))}
+    <>
+      <Static key={staticEpoch} items={messages}>
+        {(m) => <CommittedMessage key={m.id} message={m} />}
+      </Static>
 
       {thinkingLabel ? (
         <Text dimColor color="yellow">
@@ -71,7 +81,7 @@ export function MessageList({
           <Text>{streamingText || "…"}</Text>
         </Box>
       ) : null}
-    </Box>
+    </>
   );
 }
 

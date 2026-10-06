@@ -1,6 +1,11 @@
-# MewCode 配置示例（请复制为 config.yaml 并填写真实 api_key）
+# MewCode 配置示例（请复制为 config.yaml）
 # 项目路径：./.mewcode/config.yaml（优先）
 # 用户路径：~/.mewcode/config.yaml
+#
+# API Key 注入方式（优先级从高到低）：
+# 1. 环境变量 MEWCODE_<供应商名>_API_KEY（如 MEWCODE_DEEPSEEK_API_KEY）
+# 2. 环境变量 MEWCODE_API_KEY（覆盖当前 active 供应商）
+# 3. 下方 api_key 字段（支持 ${VAR} 引用环境变量）
 
 active: deepseek
 
@@ -9,7 +14,8 @@ providers:
     protocol: openai
     model: deepseek-v4-flash
     base_url: https://api.deepseek.com
-    api_key: YOUR_API_KEY
+    # 本地可直接写密钥；Docker / CI 建议用环境变量，此处可留占位
+    api_key: ${MEWCODE_API_KEY}
     # context_window: 128000  # 上下文窗口 token 上限，缺省 128000
     # thinking: true  # openai 协议不支持，开启时会告警并忽略
 
@@ -17,7 +23,7 @@ providers:
   #   protocol: anthropic
   #   model: claude-sonnet-4-20250514
   #   base_url: https://api.anthropic.com
-  #   api_key: YOUR_ANTHROPIC_KEY
+  #   api_key: ${MEWCODE_ANTHROPIC_API_KEY}
   #   thinking: true
 
 # MCP Server 列表示例（取消注释并按需填写）：

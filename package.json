@@ -3,13 +3,18 @@
   "version": "1.0.0",
   "description": "终端 AI 编程助手 MewCode",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "bin": {
-    "mewcode": "./src/index.ts"
+    "mewcode": "./dist/index.js"
   },
   "scripts": {
     "start": "tsx src/index.ts",
+    "build": "tsc",
+    "start:prod": "node dist/index.js",
     "eval": "tsx src/index.ts eval",
+    "eval:prod": "node dist/index.js eval",
+    "run": "tsx src/index.ts run",
+    "run:prod": "node dist/index.js run",
     "typecheck": "tsc --noEmit"
   },
   "author": "xingyu.wang",

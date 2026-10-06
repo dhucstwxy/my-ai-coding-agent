@@ -1,11 +1,17 @@
 node_modules/
 tests/eval/fixtures/**/node_modules/
 tests/eval/runs/
+tests/eval/swe-multilang/logs/
+tests/eval/swe-multilang/selected-20-full.jsonl
 dist/
 .mewcode/config.yaml
 .mewcode/permissions.local.yaml
 .mewcode/hooks.local.yaml
 .mewcode/sessions/
 .mewcode/worktrees/
+.mewcode/runs/
+.mewcode/memory/
+sessions/
+result.json
 *.log
 .DS_Store

@@ -36,6 +36,8 @@ export async function initializeWorktree(
   const srcModules = path.join(repoRoot, "node_modules");
   const destModules = path.join(worktreePath, "node_modules");
   if (fs.existsSync(srcModules) && !fs.existsSync(destModules)) {
-    fs.symlinkSync(srcModules, destModules, "junction");
+    // Windows 用 junction；Linux/macOS（含 Docker 镜像）用目录软链
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    fs.symlinkSync(srcModules, destModules, linkType);
   }
 }

@@ -1,0 +1,23 @@
+# 依赖与构建产物：镜像内自行安装/编译
+node_modules
+dist
+
+# 本地密钥与运行态数据：切勿打进镜像
+.mewcode/config.yaml
+.mewcode/permissions.local.yaml
+.mewcode/hooks.local.yaml
+.mewcode/sessions
+.mewcode/worktrees
+.mewcode/memory
+.mewcode/runs
+
+# 开发与评测噪音
+tests/eval/runs
+tests/eval/fixtures/**/node_modules
+*.log
+.git
+.DS_Store
+agent-transcripts
+docs
+README.md
+AGENTS.md
