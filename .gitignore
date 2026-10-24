@@ -10,6 +10,11 @@ dist/
 .mewcode/sessions/
 .mewcode/worktrees/
 .mewcode/runs/
+.mewcode/api-sessions/
+server/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
 .mewcode/memory/
 sessions/
 result.json

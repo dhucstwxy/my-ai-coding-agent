@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MewCode</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --ink: #1c1915;
+      --muted: #6d655c;
+      --line: #ddd4c6;
+      --panel: #fffdf8;
+      --accent: #0f6e56;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header, main { max-width: 880px; margin: 0 auto; padding: 20px; }
+    header { padding-bottom: 0; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    p { color: var(--muted); margin: 0; }
+    form, .history, .thread {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      margin-top: 16px;
+    }
+    label { display: block; font-size: 13px; margin: 10px 0 4px; }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+      background: white;
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    .row { display: flex; gap: 8px; margin-top: 12px; }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font: inherit;
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .msg { margin: 0 0 12px; }
+    .msg strong { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .bubble {
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+    }
+    .tool {
+      font-size: 13px;
+      color: var(--muted);
+      border-left: 3px solid var(--line);
+      padding: 4px 8px;
+      margin: 6px 0;
+    }
+    .history button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      color: var(--ink);
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      border-radius: 0;
+      padding: 8px 0;
+    }
+    .status { font-size: 13px; color: var(--muted); min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MewCode</h1>
+    <p>本地 Coding Agent。文字会在任务结束前逐步出现。</p>
+  </header>
+  <main>
+    <form id="composer">
+      <label for="workspace">工作区</label>
+      <input id="workspace" name="workspace" placeholder="留空则使用服务端当前目录" />
+      <label for="token">访问令牌</label>
+      <input id="token" name="token" type="password" placeholder="未设置 MEWCODE_SERVER_TOKEN 时留空" />
+      <label for="prompt">任务</label>
+      <textarea id="prompt" name="prompt" required placeholder="说明要做的修改"></textarea>
+      <div class="row">
+        <button type="submit" id="send">发送</button>
+        <button type="button" class="secondary" id="refresh">刷新历史</button>
+      </div>
+      <p class="status" id="status"></p>
+    </form>
+    <section class="thread" id="thread"></section>
+    <section class="history">
+      <strong>最近任务</strong>
+      <div id="history"></div>
+    </section>
+  </main>
+  <script>
+    const workspaceInput = document.querySelector("#workspace");
+    const tokenInput = document.querySelector("#token");
+    const promptInput = document.querySelector("#prompt");
+    const statusNode = document.querySelector("#status");
+    const thread = document.querySelector("#thread");
+    const historyNode = document.querySelector("#history");
+    const sendButton = document.querySelector("#send");
+    let sessionId = localStorage.getItem("mewcode.sessionId") || "";
+
+    workspaceInput.value = localStorage.getItem("mewcode.workspace") || "";
+    tokenInput.value = localStorage.getItem("mewcode.token") || "";
+
+    function authHeaders() {
+      const headers = { "Content-Type": "application/json" };
+      const token = tokenInput.value.trim();
+      if (token) headers.Authorization = "Bearer " + token;
+      return headers;
+    }
+
+    function remember() {
+      localStorage.setItem("mewcode.workspace", workspaceInput.value.trim());
+      localStorage.setItem("mewcode.token", tokenInput.value.trim());
+      localStorage.setItem("mewcode.sessionId", sessionId);
+    }
+
+    function addBlock(title, className) {
+      const wrap = document.createElement("div");
+      wrap.className = "msg";
+      const label = document.createElement("strong");
+      label.textContent = title;
+      const body = document.createElement("div");
+      body.className = className;
+      wrap.append(label, body);
+      thread.append(wrap);
+      return body;
+    }
+
+    async function readSse(response, onEvent) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+        for (const part of parts) {
+          if (!part.trim() || part.startsWith(":")) continue;
+          let event = "message";
+          const data = [];
+          for (const line of part.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) data.push(line.slice(5).trim());
+          }
+          if (!data.length) continue;
+          onEvent(event, JSON.parse(data.join("\n")));
+        }
+      }
+    }
+
+    async function refreshHistory() {
+      historyNode.replaceChildren();
+      const response = await fetch("/v1/runs?limit=20", { headers: authHeaders() });
+      if (!response.ok) {
+        historyNode.textContent = "历史暂时不可用";
+        return;
+      }
+      const runs = await response.json();
+      if (!runs.length) {
+        historyNode.textContent = "还没有任务";
+        return;
+      }
+      for (const run of runs) {
+        const button = document.createElement("button");
+        button.type = "button";
+        const text = (run.report && run.report.finalMessage) || run.partialText || run.status;
+        button.textContent = run.status + " · " + String(text).slice(0, 80);
+        button.addEventListener("click", () => {
+          thread.replaceChildren();
+          const body = addBlock("记录", "bubble");
+          body.textContent = (run.report && run.report.finalMessage) || run.partialText || "";
+          if (run.sessionId) sessionId = run.sessionId;
+          remember();
+        });
+        historyNode.append(button);
+      }
+    }
+
+    document.querySelector("#composer").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      remember();
+      const prompt = promptInput.value.trim();
+      if (!prompt) return;
+      sendButton.disabled = true;
+      statusNode.textContent = "发送中";
+      const user = addBlock("你", "bubble");
+      user.textContent = prompt;
+      const assistant = addBlock("MewCode", "bubble");
+      const payload = { prompt };
+      const workspace = workspaceInput.value.trim();
+      if (workspace) payload.workspace = workspace;
+      if (sessionId) payload.sessionId = sessionId;
+      try {
+        const created = await fetch("/v1/runs", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify(payload),
+        });
+        if (!created.ok) {
+          statusNode.textContent = "提交失败：" + (await created.text());
+          return;
+        }
+        const run = await created.json();
+        statusNode.textContent = "运行中 " + run.runId;
+        promptInput.value = "";
+        const stream = await fetch("/v1/runs/" + run.runId + "/events", {
+          headers: authHeaders(),
+        });
+        if (!stream.ok || !stream.body) {
+          statusNode.textContent = "无法订阅事件";
+          return;
+        }
+        await readSse(stream, (name, data) => {
+          if (name === "text" && data.delta) {
+            let span = assistant.querySelector(".delta");
+            if (!span) {
+              span = document.createElement("span");
+              span.className = "delta";
+              assistant.prepend(span);
+            }
+            span.textContent += data.delta;
+          }
+          if (name === "tool") {
+            const line = document.createElement("div");
+            line.className = "tool";
+            const summary = data.summary ? " " + data.summary : "";
+            line.textContent = (data.name || "tool") + " " + (data.phase || "") + summary;
+            assistant.append(line);
+          }
+          if (name === "done") {
+            const span = assistant.querySelector(".delta");
+            if ((!span || !span.textContent) && data.text) {
+              const next = document.createElement("span");
+              next.className = "delta";
+              next.textContent = data.text;
+              assistant.prepend(next);
+            }
+            if (data.sessionId) sessionId = data.sessionId;
+            statusNode.textContent = data.status + (data.error ? "：" + data.error : "");
+            remember();
+          }
+        });
+        await refreshHistory();
+      } catch (err) {
+        statusNode.textContent = "请求失败";
+      } finally {
+        sendButton.disabled = false;
+      }
+    });
+
+    document.querySelector("#refresh").addEventListener("click", refreshHistory);
+    refreshHistory();
+  </script>
+</body>
+</html>

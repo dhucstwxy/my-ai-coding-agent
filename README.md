@@ -82,6 +82,34 @@ npm run run -- --prompt-file PROMPT.md --out ./result.json
 
 退出码：`0` 正常完成；`1` 参数/配置错误；`2` Agent 失败或超时。
 
+## HTTP 服务
+
+在无头 Agent 外面加一层 FastAPI，本机用 HTTP 提交任务、订阅进度、取消运行。工具权限与 `mewcode run` 相同，为自动放行。默认只监听 `127.0.0.1:8787`。同一时刻只跑一个任务，其余请求排队。
+
+```powershell
+cd server
+python -m venv .venv
+.\.venv\Scripts\pip install -r requirements.txt
+cd ..
+$env:MEWCODE_API_KEY = "sk-xxx"
+.\server\.venv\Scripts\python server\mewcode_api\__main__.py
+```
+
+依赖已经装进当前 Python 时，也可以在仓库根目录执行 `npm run serve`。
+
+提交任务并等待最终回复：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8787/v1/runs/wait -Method Post -ContentType "application/json" -Body (@{
+  prompt = "只回复：pong"
+  workspace = (Get-Location).Path
+} | ConvertTo-Json)
+```
+
+聊天页：<http://127.0.0.1:8787/chat> 。异步提交、流式事件和重启续跑见 `server/README.md`。
+
+会话写在 `<workspace>/.mewcode/api-sessions/`。把上一次结果里的 `sessionId` 放进下一次请求即可多轮继续。说明见 `server/README.md`。
+
 Docker（不需要 `-it`）：
 
 ```powershell

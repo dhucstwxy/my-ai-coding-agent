@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { AgentLoop } from "../agent/loop.js";
-import { createCancelToken } from "../agent/cancel.js";
-import { DEFAULT_AGENT_OPTIONS } from "../agent/types.js";
+import { createCancelToken, type CancelToken } from "../agent/cancel.js";
+import { DEFAULT_AGENT_OPTIONS, type AgentEvent } from "../agent/types.js";
 import { loadConfig } from "../config/load.js";
 import { PermissionGate } from "../permission/gate.js";
 import { PermissionModeStore } from "../permission/mode-store.js";
@@ -21,9 +21,25 @@ export interface HeadlessRunOptions {
   configRoot?: string;
   sessionsDir: string;
   timeoutMs: number;
+  /** 继续已有会话。不传则新建。只允许安全文件名，避免路径穿越 */
+  sessionId?: string;
+  /** 外部取消令牌。未传则内部创建；超时也会取消这枚令牌 */
+  cancel?: CancelToken;
+  /** 每个 Agent 事件（文本增量、工具开始/结束等） */
+  onEvent?: (event: AgentEvent) => void;
+  /** 会话已打开、尚未进入循环。用于把 sessionId 提前交给服务端 */
+  onSession?: (sessionId: string) => void;
+  /**
+   * 为真时不再把 prompt 写入会话。
+   * 服务重启后续跑已提交过的用户消息时使用。
+   */
+  resume?: boolean;
   /** 进度日志，默认写 stderr */
   log?: (line: string) => void;
 }
+
+/** 会话 ID 会拼进文件名，拒绝路径分隔和 `..` */
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
 
 export interface HeadlessRunResult {
   report: RunReport;
@@ -55,17 +71,19 @@ export async function runHeadless(
   });
 
   if (!opts.prompt.trim()) {
+    return finish(failed(baseReport(), startedMs, "prompt 为空"), 1);
+  }
+
+  if (
+    opts.sessionId &&
+    (!SESSION_ID_PATTERN.test(opts.sessionId) || opts.sessionId.includes(".."))
+  ) {
+    return finish(failed(baseReport(), startedMs, "sessionId 不合法"), 1);
+  }
+
+  if (!fs.existsSync(opts.workspace) || !fs.statSync(opts.workspace).isDirectory()) {
     return finish(
-      {
-        ...baseReport(),
-        endedAt: new Date().toISOString(),
-        exitCode: 1,
-        steps: 0,
-        latencyMs: 0,
-        finalMessage: "",
-        tools: [],
-        error: "prompt 为空",
-      },
+      failed(baseReport(), startedMs, `工作区不存在：${opts.workspace}`),
       1,
     );
   }
@@ -126,8 +144,31 @@ export async function runHeadless(
 
   fs.mkdirSync(opts.sessionsDir, { recursive: true });
   const store = new SessionStore(opts.sessionsDir);
-  const session = store.create(`run-${runId.slice(0, 8)}`);
+  const session = opts.sessionId
+    ? store.open(opts.sessionId)
+    : store.create(`run-${runId.slice(0, 8)}`);
+  if (!session) {
+    return finish(
+      failed(
+        {
+          ...baseReport(),
+          providerName: active.name,
+          model: active.model,
+        },
+        startedMs,
+        `会话不存在：${opts.sessionId}`,
+      ),
+      1,
+    );
+  }
   permissionModes.set(session.id, "allow");
+  try {
+    opts.onSession?.(session.id);
+  } catch (err) {
+    log(
+      `[run] onSession 失败：${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   const loop = new AgentLoop(
     store,
@@ -139,7 +180,7 @@ export async function runHeadless(
     DEFAULT_AGENT_OPTIONS,
   );
 
-  const cancel = createCancelToken();
+  const cancel = opts.cancel ?? createCancelToken();
   const tools: RunToolRecord[] = [];
   const toolStartedAt = new Map<string, number>();
   let steps = 0;
@@ -150,7 +191,9 @@ export async function runHeadless(
   log(`[run] ${runId} workspace=${opts.workspace}`);
   log(`[run] provider=${active.name} model=${active.model}`);
 
+  let timedOut = false;
   const timer = setTimeout(() => {
+    timedOut = true;
     log(`[run] timeout ${opts.timeoutMs}ms，取消中…`);
     cancel.cancel();
   }, opts.timeoutMs);
@@ -160,7 +203,15 @@ export async function runHeadless(
       cancel,
       mode: "execute",
       skipMemoryUpdate: true,
+      skipUserAppend: opts.resume === true,
     })) {
+      try {
+        opts.onEvent?.(event);
+      } catch (err) {
+        log(
+          `[run] onEvent 失败：${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       if (event.type === "text_delta") {
         finalMessage += event.text;
       }
@@ -203,8 +254,11 @@ export async function runHeadless(
   }
 
   const latencyMs = Date.now() - startedMs;
-  if (cancel.isCancelled && !runError) {
+  if (timedOut) {
     runError = "agent_timeout";
+    stopReason = "cancelled";
+  } else if (cancel.isCancelled && !runError) {
+    runError = "已取消";
     stopReason ??= "cancelled";
   }
 
@@ -234,6 +288,26 @@ export async function runHeadless(
 
 function finish(report: RunReport, exitCode: number): HeadlessRunResult {
   return { report, exitCode };
+}
+
+function failed(
+  base: Omit<
+    RunReport,
+    "endedAt" | "exitCode" | "steps" | "latencyMs" | "finalMessage" | "tools" | "error"
+  >,
+  startedMs: number,
+  error: string,
+): RunReport {
+  return {
+    ...base,
+    endedAt: new Date().toISOString(),
+    exitCode: 1,
+    steps: 0,
+    latencyMs: Date.now() - startedMs,
+    finalMessage: "",
+    tools: [],
+    error,
+  };
 }
 
 function truncate(text: string, max: number): string {
