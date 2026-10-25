@@ -61,6 +61,8 @@
       word-break: break-word;
       line-height: 1.5;
     }
+    .approval { margin-top: 8px; }
+    .approval .choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .tool {
       font-size: 13px;
       color: var(--muted);
@@ -283,6 +285,13 @@
         const assistant = addBlock("MewCode", "bubble");
         statusNode.textContent = "运行中 " + run.runId;
         promptInput.value = "";
+        let approvalBox = null;
+        let approvalSettled = false;
+        function markApprovalDenied() {
+          if (!approvalBox || approvalSettled) return;
+          approvalSettled = true;
+          approvalBox.textContent = "已拒绝";
+        }
         const stream = await fetch("/v1/runs/" + run.runId + "/events", {
           headers: authHeaders(),
         });
@@ -307,7 +316,54 @@
             line.textContent = (data.name || "tool") + " " + (data.phase || "") + summary;
             assistant.append(line);
           }
+          if (name === "warning" && data.message) {
+            const line = document.createElement("div");
+            line.className = "tool";
+            line.textContent = data.message;
+            assistant.append(line);
+          }
+          if (name === "approval" && data.status === "pending") {
+            approvalSettled = false;
+            approvalBox = document.createElement("div");
+            approvalBox.className = "approval";
+            const info = document.createElement("div");
+            info.textContent = [data.tool, data.subject, data.argsSummary].filter(Boolean).join(" ");
+            const choices = document.createElement("div");
+            choices.className = "choices";
+            const labels = {
+              deny: "拒绝",
+              once: "仅本次放行",
+              session: "本会话放行",
+              permanent: "永久放行",
+            };
+            for (const choice of data.choices || ["deny", "once", "session", "permanent"]) {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.textContent = labels[choice] || choice;
+              button.addEventListener("click", async () => {
+                approvalSettled = true;
+                choices.remove();
+                await fetch("/v1/runs/" + run.runId + "/approval", {
+                  method: "POST",
+                  headers: authHeaders(),
+                  body: JSON.stringify({ approvalId: data.approvalId, choice }),
+                });
+              });
+              choices.append(button);
+            }
+            approvalBox.append(info, choices);
+            assistant.append(approvalBox);
+          }
+          if (name === "approval" && data.status === "allowed") {
+            approvalSettled = true;
+            const choices = approvalBox && approvalBox.querySelector(".choices");
+            if (choices) choices.remove();
+          }
+          if (name === "approval" && data.status === "denied" && !approvalSettled) {
+            markApprovalDenied();
+          }
           if (name === "done") {
+            markApprovalDenied();
             const span = assistant.querySelector(".delta");
             if ((!span || !span.textContent) && data.text) {
               const next = document.createElement("span");

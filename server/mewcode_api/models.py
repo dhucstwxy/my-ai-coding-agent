@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mewcode_api.settings import MAX_TIMEOUT_MS
 
@@ -76,6 +76,13 @@ class SendMessageResponse(BaseModel):
     status: RunStatus
     workspace: str
     position: int = 1
+
+
+class ApprovalBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    approvalId: str = Field(min_length=1)
+    choice: Literal["deny", "once", "session", "permanent"]
 
 
 class RunView(BaseModel):

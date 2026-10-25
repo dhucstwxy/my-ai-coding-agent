@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import readline from "node:readline";
 import { createCancelToken, type CancelToken } from "../agent/cancel.js";
+import { SessionGrantStore } from "../permission/session-grants.js";
+import type { PermissionChoice } from "../permission/types.js";
 import { runHeadless } from "../run/runner.js";
+import { runSessionTurn } from "../run/session-turn.js";
 import { DEFAULT_RUN_TIMEOUT_MS } from "../run/types.js";
 
 /**
@@ -10,18 +13,22 @@ import { DEFAULT_RUN_TIMEOUT_MS } from "../run/types.js";
  *
  * 请求：
  *   {"type":"run","requestId","workspace","prompt","sessionId?","timeoutMs?","sessionsDir","configRoot?","resume?"}
+ *   {"type":"session-run", ...与 run 相同的字段}
+ *   {"type":"approval","requestId","approvalId","choice"}
  *   {"type":"cancel","requestId"}
  *   {"type":"shutdown"}
  * 响应：
  *   {"type":"ready","v":1}
  *   {"type":"session","requestId","sessionId"}
  *   {"type":"event","requestId","event"}
+ *   {"type":"approval","requestId","approvalId","status","tool","subject","argsSummary","choice?"}
+ *   {"type":"warning","requestId","message"}
  *   {"type":"result","requestId","exitCode","report"}
  *   {"type":"error","requestId?","message"}
  */
 
 interface RunCommand {
-  type: "run";
+  type: "run" | "session-run";
   requestId: string;
   workspace: string;
   prompt: string;
@@ -32,7 +39,17 @@ interface RunCommand {
   resume?: boolean;
 }
 
+const CHOICES = new Set<PermissionChoice>(["deny", "once", "session", "permanent"]);
+
+interface PendingApproval {
+  approvalId: string;
+  resolve: (choice: PermissionChoice) => void;
+}
+
 const inflight = new Map<string, CancelToken>();
+/** 本进程内的本会话放行。进程退出即丢失，不写入会话文件。 */
+const sessionGrants = new SessionGrantStore();
+const approvals = new Map<string, PendingApproval>();
 let chain: Promise<void> = Promise.resolve();
 let stopping = false;
 
@@ -85,28 +102,47 @@ async function handleRun(cmd: RunCommand, cancel: CancelToken): Promise<void> {
     return;
   }
 
+  const timeoutMs =
+    typeof cmd.timeoutMs === "number" && cmd.timeoutMs > 0
+      ? cmd.timeoutMs
+      : DEFAULT_RUN_TIMEOUT_MS;
+  const shared = {
+    workspace: cmd.workspace,
+    prompt: cmd.prompt,
+    promptSource: "arg" as const,
+    sessionsDir: cmd.sessionsDir,
+    timeoutMs,
+    sessionId: cmd.sessionId,
+    resume: cmd.resume === true,
+    cancel,
+    log: logLine,
+    onSession: (sessionId: string) => {
+      emit({ type: "session", requestId: cmd.requestId, sessionId });
+    },
+    onEvent: (event: unknown) => {
+      emit({ type: "event", requestId: cmd.requestId, event });
+    },
+  };
+
   try {
-    const { report, exitCode } = await runHeadless({
-      workspace: cmd.workspace,
-      prompt: cmd.prompt,
-      promptSource: "arg",
-      configRoot: cmd.configRoot,
-      sessionsDir: cmd.sessionsDir,
-      timeoutMs:
-        typeof cmd.timeoutMs === "number" && cmd.timeoutMs > 0
-          ? cmd.timeoutMs
-          : DEFAULT_RUN_TIMEOUT_MS,
-      sessionId: cmd.sessionId,
-      resume: cmd.resume === true,
-      cancel,
-      log: logLine,
-      onSession: (sessionId) => {
-        emit({ type: "session", requestId: cmd.requestId, sessionId });
-      },
-      onEvent: (event) => {
-        emit({ type: "event", requestId: cmd.requestId, event });
-      },
-    });
+    const { report, exitCode } =
+      cmd.type === "session-run"
+        ? await runSessionTurn({
+            ...shared,
+            grants: sessionGrants,
+            onWarning: (message) => {
+              emit({ type: "warning", requestId: cmd.requestId, message });
+            },
+            onApproval: (notice) => {
+              emit({ type: "approval", requestId: cmd.requestId, ...notice });
+            },
+            awaitChoice: (_notice, signal) =>
+              waitForApproval(cmd.requestId, _notice.approvalId, signal),
+          })
+        : await runHeadless({
+            ...shared,
+            configRoot: cmd.configRoot,
+          });
     emit({ type: "result", requestId: cmd.requestId, exitCode, report });
   } catch (err) {
     emit({
@@ -117,6 +153,28 @@ async function handleRun(cmd: RunCommand, cancel: CancelToken): Promise<void> {
   } finally {
     inflight.delete(cmd.requestId);
   }
+}
+
+function waitForApproval(
+  requestId: string,
+  approvalId: string,
+  signal: CancelToken,
+): Promise<PermissionChoice> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (choice: PermissionChoice) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      approvals.delete(requestId);
+      resolve(choice);
+    };
+    approvals.set(requestId, { approvalId, resolve: finish });
+    const timer = setInterval(() => {
+      if (signal.isCancelled || stopping) finish("deny");
+    }, 100);
+    if (signal.isCancelled || stopping) finish("deny");
+  });
 }
 
 function enqueue(cmd: RunCommand, cancel: CancelToken): void {
@@ -168,7 +226,26 @@ export async function runServeWorker(): Promise<void> {
       continue;
     }
 
-    if (msg.type === "run") {
+    if (msg.type === "approval") {
+      const requestId = msg.requestId;
+      const approvalId = msg.approvalId;
+      const choice = msg.choice;
+      const slot =
+        typeof requestId === "string" ? approvals.get(requestId) : undefined;
+      if (
+        !slot ||
+        slot.approvalId !== approvalId ||
+        typeof choice !== "string" ||
+        !CHOICES.has(choice as PermissionChoice)
+      ) {
+        emit({ type: "error", message: "没有待确认的询问" });
+        continue;
+      }
+      slot.resolve(choice as PermissionChoice);
+      continue;
+    }
+
+    if (msg.type === "run" || msg.type === "session-run") {
       const requestId = msg.requestId;
       const workspace = msg.workspace;
       const prompt = msg.prompt;
@@ -198,7 +275,7 @@ export async function runServeWorker(): Promise<void> {
       inflight.set(requestId, cancel);
       enqueue(
         {
-          type: "run",
+          type: msg.type,
           requestId,
           workspace,
           prompt,

@@ -109,6 +109,12 @@ class RunState:
     attempt: int = 0
     idempotency_key: str | None = None
     resume: bool = False
+    session_turn: bool = False
+    pending_approval_id: str | None = None
+    pending_tool: str = ""
+    pending_subject: str = ""
+    pending_summary: str = ""
+    approval_answered: bool = False
     events: list[dict[str, Any]] = field(default_factory=list)
     subscribers: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
 
@@ -142,6 +148,7 @@ class RunState:
             "attempt": self.attempt,
             "idempotencyKey": self.idempotency_key,
             "prompt": self.prompt,
+            "sessionTurn": self.session_turn,
         }
 
     def done_payload(self) -> dict[str, Any]:
@@ -175,6 +182,7 @@ class RunState:
     ) -> None:
         if self.status in TERMINAL:
             return
+        self._deny_unanswered_approval()
         self.status = status
         self.ended_at = now_iso()
         if report is not None:
@@ -188,6 +196,27 @@ class RunState:
             self.error = "agent 未正常完成"
         self.publish({"event": "done", "data": self.done_payload()})
         self.done.set()
+
+    def _deny_unanswered_approval(self) -> None:
+        approval_id = self.pending_approval_id
+        if not approval_id:
+            return
+        self.pending_approval_id = None
+        self.approval_answered = True
+        self.publish(
+            {
+                "event": "approval",
+                "data": {
+                    "approvalId": approval_id,
+                    "runId": self.run_id,
+                    "status": "denied",
+                    "tool": self.pending_tool,
+                    "subject": self.pending_subject,
+                    "argsSummary": self.pending_summary,
+                    "choice": "deny",
+                },
+            }
+        )
 
 
 class RunManager:
@@ -278,6 +307,7 @@ class RunManager:
             sessions_dir=str(workspace / ".mewcode" / "api-sessions"),
             created_at=now_iso(),
             session_id=checked,
+            session_turn=True,
         )
         self.runs[run.run_id] = run
         self._persist(run)
@@ -413,7 +443,7 @@ class RunManager:
 
     async def _consume(self, run: RunState) -> None:
         payload: dict[str, Any] = {
-            "type": "run",
+            "type": "session-run" if run.session_turn else "run",
             "requestId": run.run_id,
             "workspace": run.workspace,
             "prompt": run.prompt,
@@ -442,6 +472,15 @@ class RunManager:
                 event = msg.get("event")
                 if isinstance(event, dict):
                     self._on_agent_event(run, event)
+                continue
+            if kind == "approval":
+                self._on_approval(run, msg)
+                continue
+            if kind == "warning":
+                message = msg.get("message")
+                if isinstance(message, str) and message:
+                    run.publish({"event": "warning", "data": {"message": message}})
+                    self._remember_event(run)
                 continue
             if kind == "result":
                 report = msg.get("report") if isinstance(msg.get("report"), dict) else {}
@@ -494,6 +533,55 @@ class RunManager:
             self._remember_event(run)
         run.publish({"event": "agent", "data": event})
         self._remember_event(run)
+
+    def _on_approval(self, run: RunState, msg: dict[str, Any]) -> None:
+        approval_id = msg.get("approvalId")
+        status = msg.get("status")
+        if not isinstance(approval_id, str) or not approval_id:
+            return
+        if status not in {"pending", "allowed", "denied"}:
+            return
+        tool = msg.get("tool") if isinstance(msg.get("tool"), str) else ""
+        subject = msg.get("subject") if isinstance(msg.get("subject"), str) else ""
+        summary = msg.get("argsSummary") if isinstance(msg.get("argsSummary"), str) else ""
+        data: dict[str, Any] = {
+            "approvalId": approval_id,
+            "runId": run.run_id,
+            "status": status,
+            "tool": tool,
+            "subject": subject,
+            "argsSummary": summary,
+        }
+        if status == "pending":
+            data["choices"] = ["deny", "once", "session", "permanent"]
+            run.pending_approval_id = approval_id
+            run.pending_tool = tool
+            run.pending_subject = subject
+            run.pending_summary = summary
+            run.approval_answered = False
+        else:
+            choice = msg.get("choice")
+            if choice in {"deny", "once", "session", "permanent"}:
+                data["choice"] = choice
+            if run.pending_approval_id == approval_id:
+                run.pending_approval_id = None
+        run.publish({"event": "approval", "data": data})
+        self._remember_event(run)
+
+    async def answer_approval(self, run_id: str, approval_id: str, choice: str) -> RunState:
+        run = self.get(run_id)
+        if not run.session_turn or run.status in TERMINAL:
+            raise HTTPException(status_code=409, detail="这一轮不能提交选择")
+        if run.approval_answered or run.pending_approval_id != approval_id:
+            raise HTTPException(status_code=409, detail="询问已结束或不匹配")
+        self._require_worker()
+        run.approval_answered = True
+        try:
+            await self.worker.approve(run.run_id, approval_id, choice)
+        except RuntimeError as exc:
+            run.approval_answered = False
+            raise HTTPException(status_code=503, detail="执行器不可用") from exc
+        return run
 
     def _finish_from_report(
         self,
@@ -591,6 +679,7 @@ class RunManager:
                 if isinstance(record.get("idempotencyKey"), str)
                 else None
             ),
+            session_turn=record.get("sessionTurn") is True,
         )
         run.events = self.store.load_events(run.run_id, EVENT_BUFFER_LIMIT)
         return run

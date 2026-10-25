@@ -129,9 +129,27 @@ def complete(msg: dict, request_id: str) -> None:
     )
 
 
+def emit_approval(request_id: str, status: str, choice: str | None = None) -> None:
+    payload: dict[str, object] = {
+        "type": "approval",
+        "requestId": request_id,
+        "approvalId": "ask-1",
+        "status": status,
+        "tool": "write_file",
+        "subject": "a.txt",
+        "argsSummary": "写入",
+    }
+    if status == "pending":
+        payload["choices"] = ["deny", "once", "session", "permanent"]
+    if choice:
+        payload["choice"] = choice
+    emit(payload)
+
+
 def main() -> None:
     emit({"type": "ready", "v": 1})
     waiting: str | None = None
+    pending_ask: dict | None = None
     for line in sys.stdin:
         text = line.strip()
         if not text:
@@ -141,7 +159,12 @@ def main() -> None:
         if kind == "shutdown":
             return
         if kind == "cancel":
-            request_id = msg.get("requestId") or waiting
+            request_id = msg.get("requestId") or (
+                pending_ask["requestId"] if pending_ask else waiting
+            )
+            if pending_ask and pending_ask["requestId"] == request_id:
+                emit_approval(request_id, "denied", "deny")
+                pending_ask = None
             if isinstance(request_id, str):
                 result(
                     request_id,
@@ -156,11 +179,52 @@ def main() -> None:
                 )
             waiting = None
             continue
-        if kind != "run":
+        if kind == "approval":
+            request_id = msg.get("requestId")
+            if (
+                pending_ask is None
+                or pending_ask["requestId"] != request_id
+                or msg.get("approvalId") != "ask-1"
+            ):
+                emit({"type": "error", "message": "没有待确认的询问"})
+                continue
+            choice = msg.get("choice")
+            saved = pending_ask["msg"]
+            pending_ask = None
+            if choice == "deny":
+                emit_approval(request_id, "denied", "deny")
+                result(
+                    request_id,
+                    1,
+                    {
+                        "stopReason": "error",
+                        "error": "已拒绝",
+                        "sessionId": saved.get("sessionId") or "sess-new",
+                        "finalMessage": "",
+                        "exitCode": 1,
+                        "tools": [],
+                    },
+                )
+                continue
+            emit_approval(request_id, "allowed", choice if isinstance(choice, str) else "once")
+            complete(saved, request_id)
+            continue
+        if kind not in ("run", "session-run"):
             emit({"type": "error", "message": "未知命令"})
             continue
         request_id = msg["requestId"]
         prompt = msg.get("prompt") or ""
+        if kind == "session-run" and prompt == "ASK":
+            pending_ask = {"requestId": request_id, "msg": msg}
+            emit(
+                {
+                    "type": "session",
+                    "requestId": request_id,
+                    "sessionId": msg.get("sessionId") or "sess-new",
+                }
+            )
+            emit_approval(request_id, "pending")
+            continue
         if prompt == "WAIT_CANCEL":
             waiting = request_id
             emit(

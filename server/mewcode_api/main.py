@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from mewcode_api.models import (
+    ApprovalBody,
     ConversationDetail,
     ConversationSummary,
     CreateConversationBody,
@@ -278,6 +279,24 @@ def create_app(worker_cmd: list[str] | None = None) -> FastAPI:
     async def cancel_run(run_id: str, request: Request) -> RunView:
         current_run_id.set(run_id)
         run = await get_manager(request).cancel(run_id)
+        return RunView.model_validate(run.to_dict())
+
+    @app.post(
+        "/v1/runs/{run_id}/approval",
+        response_model=RunView,
+        dependencies=[Depends(require_token)],
+    )
+    async def answer_approval(
+        run_id: str,
+        body: ApprovalBody,
+        request: Request,
+    ) -> RunView:
+        current_run_id.set(run_id)
+        run = await get_manager(request).answer_approval(
+            run_id,
+            body.approvalId,
+            body.choice,
+        )
         return RunView.model_validate(run.to_dict())
 
     @app.get(

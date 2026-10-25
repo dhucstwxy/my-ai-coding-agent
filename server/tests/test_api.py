@@ -674,6 +674,134 @@ class ApiTests(unittest.TestCase):
         self.assertIn("这段对话正忙", page.text)
         self.assertNotIn("mewcode.sessionId", page.text)
         self.assertLess(page.text.index("status === 409"), page.text.index('addBlock("你"'))
+        self.assertIn("/approval", page.text)
+        for label in ("拒绝", "仅本次放行", "本会话放行", "永久放行"):
+            self.assertIn(label, page.text)
+
+    def test_session_approval_choices_and_conflicts(self) -> None:
+        created = self._create_session()
+        sent = self._send(created["sessionId"], "ASK")
+        self.assertEqual(sent.status_code, 202)
+        run_id = sent.json()["runId"]
+        self._wait_status(run_id, "running")
+        pending = None
+        for _ in range(40):
+            events = self.app.state.manager.get(run_id).events
+            pending = next(
+                (
+                    item
+                    for item in events
+                    if item.get("event") == "approval"
+                    and item.get("data", {}).get("status") == "pending"
+                ),
+                None,
+            )
+            if pending is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(pending)
+        self.assertEqual(
+            pending["data"]["choices"],
+            ["deny", "once", "session", "permanent"],
+        )
+        choice = self._choose(run_id, "once")
+        self.assertEqual(choice.status_code, 200, choice.text)
+        again = self.client.post(
+            f"/v1/runs/{run_id}/approval",
+            json={"approvalId": "ask-1", "choice": "once"},
+        )
+        self.assertEqual(again.status_code, 409)
+        view = self._wait(run_id)
+        self.assertEqual(view["status"], "completed")
+        with self.client.stream("GET", f"/v1/runs/{run_id}/events") as resp:
+            body = "".join(resp.iter_text())
+        self.assertIn("event: approval", body)
+        for option in ("deny", "once", "session", "permanent"):
+            self.assertIn(option, body)
+
+        denied = self._send(created["sessionId"], "ASK")
+        denied_id = denied.json()["runId"]
+        refused = self._choose(denied_id, "deny")
+        self.assertEqual(refused.status_code, 200, refused.text)
+        refused_view = self._wait(denied_id)
+        self.assertEqual(refused_view["status"], "failed")
+        transcript = (
+            Path(self.workspace)
+            / ".mewcode"
+            / "api-sessions"
+            / f"{created['sessionId']}.jsonl"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("write_file", transcript)
+
+    def test_cancel_approval_and_other_session_stays_queued(self) -> None:
+        first = self._create_session()["sessionId"]
+        second = self._create_session()["sessionId"]
+        held = self._send(first, "ASK")
+        run_id = held.json()["runId"]
+        self._wait_status(run_id, "running")
+        time.sleep(0.2)
+        queued = self._send(second, "只回复 pong")
+        self.assertEqual(queued.status_code, 202)
+        busy = self._send(first, "另一句")
+        self.assertEqual(busy.status_code, 409)
+        cancelled = self.client.post(f"/v1/runs/{run_id}/cancel")
+        self.assertEqual(cancelled.status_code, 200)
+        view = self._wait(run_id)
+        self.assertEqual(view["status"], "cancelled")
+        with self.client.stream("GET", f"/v1/runs/{run_id}/events") as resp:
+            body = "".join(resp.iter_text())
+        self.assertIn('"status": "denied"', body)
+        again = self._send(first, "只回复 pong")
+        self.assertEqual(again.status_code, 202)
+        self._wait(again.json()["runId"])
+        self._wait(queued.json()["runId"])
+
+    def test_one_shot_rejects_approval(self) -> None:
+        created = self.client.post(
+            "/v1/runs",
+            json={"prompt": "ASK", "workspace": self.workspace},
+        )
+        run_id = created.json()["runId"]
+        view = self._wait(run_id)
+        self.assertEqual(view["status"], "completed")
+        with self.client.stream("GET", f"/v1/runs/{run_id}/events") as resp:
+            body = "".join(resp.iter_text())
+        self.assertNotIn("event: approval", body)
+        rejected = self.client.post(
+            f"/v1/runs/{run_id}/approval",
+            json={"approvalId": "ask-1", "choice": "once"},
+        )
+        self.assertEqual(rejected.status_code, 409)
+        missing = self.client.post(
+            "/v1/runs/missing-run/approval",
+            json={"approvalId": "ask-1", "choice": "deny"},
+        )
+        self.assertEqual(missing.status_code, 404)
+        bad_choice = self.client.post(
+            f"/v1/runs/{run_id}/approval",
+            json={"approvalId": "ask-1", "choice": "allow"},
+        )
+        self.assertEqual(bad_choice.status_code, 422)
+
+        os.environ["MEWCODE_SERVER_TOKEN"] = "secret"
+        denied = self.client.post(
+            f"/v1/runs/{run_id}/approval",
+            json={"approvalId": "ask-1", "choice": "deny"},
+        )
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(self.client.get("/health").status_code, 200)
+
+    def _choose(self, run_id: str, choice: str):
+        last = None
+        for _ in range(50):
+            last = self.client.post(
+                f"/v1/runs/{run_id}/approval",
+                json={"approvalId": "ask-1", "choice": choice},
+            )
+            if last.status_code != 409:
+                return last
+            time.sleep(0.05)
+        return last
 
     def _create_session(self) -> dict:
         response = self.client.post(

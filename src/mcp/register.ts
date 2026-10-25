@@ -30,8 +30,9 @@ export interface ConnectMcpResult {
 export async function connectMcpServers(
   workspaceRoot: string,
   registry: ToolRegistry,
+  paths?: { user?: string; project?: string },
 ): Promise<ConnectMcpResult> {
-  const loaded = loadMcpServers(workspaceRoot);
+  const loaded = loadMcpServers(workspaceRoot, paths);
   const warnings = [...loaded.warnings];
   const sessions: McpSession[] = [];
   let closed = false;

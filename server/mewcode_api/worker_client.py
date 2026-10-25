@@ -123,6 +123,17 @@ class WorkerClient:
     async def cancel(self, request_id: str) -> None:
         await self._send({"type": "cancel", "requestId": request_id})
 
+    async def approve(self, request_id: str, approval_id: str, choice: str) -> None:
+        """写一行审批选择。不新开一轮，也不打断正在读的输出。"""
+        await self._send(
+            {
+                "type": "approval",
+                "requestId": request_id,
+                "approvalId": approval_id,
+                "choice": choice,
+            }
+        )
+
     async def run(
         self,
         request_id: str,
