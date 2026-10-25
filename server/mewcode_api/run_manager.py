@@ -247,6 +247,51 @@ class RunManager:
         )
         return run, position
 
+    def busy_session_ids(self) -> set[str]:
+        found: set[str] = set()
+        for run in self.runs.values():
+            if run.status in TERMINAL or not run.session_id:
+                continue
+            found.add(run.session_id)
+        return found
+
+    def submit_for_session(
+        self,
+        workspace: Path,
+        session_id: str,
+        prompt: str,
+    ) -> tuple[RunState, int]:
+        """为已有对话排入一轮。检查和入队在同一次调用里完成。"""
+        self._require_worker()
+        checked = check_session_id(session_id)
+        if checked is None:
+            raise HTTPException(status_code=400, detail="sessionId 不合法")
+        if checked in self.busy_session_ids():
+            raise HTTPException(status_code=409, detail="这段对话正忙")
+        if self._inflight_count() >= self.settings.max_queued:
+            raise HTTPException(status_code=429, detail="排队任务已满")
+        run = RunState(
+            run_id=str(uuid4()),
+            workspace=str(workspace),
+            prompt=prompt,
+            timeout_ms=DEFAULT_TIMEOUT_MS,
+            sessions_dir=str(workspace / ".mewcode" / "api-sessions"),
+            created_at=now_iso(),
+            session_id=checked,
+        )
+        self.runs[run.run_id] = run
+        self._persist(run)
+        self.queue.put_nowait(run.run_id)
+        position = self.queue.qsize()
+        log.info(
+            "排队会话 run=%s session=%s workspace=%s prompt_len=%s",
+            run.run_id,
+            checked,
+            run.workspace,
+            len(prompt),
+        )
+        return run, position
+
     async def wait_for(self, run: RunState) -> RunState:
         try:
             await asyncio.wait_for(run.done.wait(), run.timeout_ms / 1000 + 35)

@@ -97,13 +97,14 @@
       <textarea id="prompt" name="prompt" required placeholder="说明要做的修改"></textarea>
       <div class="row">
         <button type="submit" id="send">发送</button>
-        <button type="button" class="secondary" id="refresh">刷新历史</button>
+        <button type="button" class="secondary" id="create">新建对话</button>
+        <button type="button" class="secondary" id="refresh">刷新对话</button>
       </div>
       <p class="status" id="status"></p>
     </form>
     <section class="thread" id="thread"></section>
     <section class="history">
-      <strong>最近任务</strong>
+      <strong>对话</strong>
       <div id="history"></div>
     </section>
   </main>
@@ -115,7 +116,7 @@
     const thread = document.querySelector("#thread");
     const historyNode = document.querySelector("#history");
     const sendButton = document.querySelector("#send");
-    let sessionId = localStorage.getItem("mewcode.sessionId") || "";
+    let currentSessionId = "";
 
     workspaceInput.value = localStorage.getItem("mewcode.workspace") || "";
     tokenInput.value = localStorage.getItem("mewcode.token") || "";
@@ -130,7 +131,19 @@
     function remember() {
       localStorage.setItem("mewcode.workspace", workspaceInput.value.trim());
       localStorage.setItem("mewcode.token", tokenInput.value.trim());
-      localStorage.setItem("mewcode.sessionId", sessionId);
+    }
+
+    function workspaceQuery() {
+      const workspace = workspaceInput.value.trim();
+      if (!workspace) return "";
+      return "?workspace=" + encodeURIComponent(workspace);
+    }
+
+    function workspacePayload(extra) {
+      const payload = extra || {};
+      const workspace = workspaceInput.value.trim();
+      if (workspace) payload.workspace = workspace;
+      return payload;
     }
 
     function addBlock(title, className) {
@@ -169,59 +182,105 @@
       }
     }
 
-    async function refreshHistory() {
-      historyNode.replaceChildren();
-      const response = await fetch("/v1/runs?limit=20", { headers: authHeaders() });
+    function showMessages(messages) {
+      thread.replaceChildren();
+      for (const message of messages) {
+        const title = message.role === "user" ? "你" : "MewCode";
+        const body = addBlock(title, "bubble");
+        body.textContent = message.content || "";
+      }
+    }
+
+    async function openSession(sessionId) {
+      currentSessionId = sessionId;
+      remember();
+      const response = await fetch(
+        "/v1/sessions/" + encodeURIComponent(sessionId) + workspaceQuery(),
+        { headers: authHeaders() },
+      );
       if (!response.ok) {
-        historyNode.textContent = "历史暂时不可用";
+        statusNode.textContent = "无法打开对话：" + (await response.text());
         return;
       }
-      const runs = await response.json();
-      if (!runs.length) {
-        historyNode.textContent = "还没有任务";
+      const detail = await response.json();
+      showMessages(detail.messages || []);
+      statusNode.textContent = detail.busy ? "这段对话正忙" : detail.label;
+    }
+
+    async function refreshSessions() {
+      historyNode.replaceChildren();
+      const response = await fetch("/v1/sessions" + workspaceQuery(), {
+        headers: authHeaders(),
+      });
+      if (!response.ok) {
+        historyNode.textContent = "对话暂时不可用";
         return;
       }
-      for (const run of runs) {
+      const sessions = await response.json();
+      if (!sessions.length) {
+        historyNode.textContent = "还没有对话";
+        return;
+      }
+      for (const session of sessions) {
         const button = document.createElement("button");
         button.type = "button";
-        const text = (run.report && run.report.finalMessage) || run.partialText || run.status;
-        button.textContent = run.status + " · " + String(text).slice(0, 80);
+        const mark = session.busy ? "进行中 · " : "";
+        button.textContent = mark + (session.label || "新对话");
         button.addEventListener("click", () => {
-          thread.replaceChildren();
-          const body = addBlock("记录", "bubble");
-          body.textContent = (run.report && run.report.finalMessage) || run.partialText || "";
-          if (run.sessionId) sessionId = run.sessionId;
-          remember();
+          openSession(session.sessionId);
         });
         historyNode.append(button);
       }
     }
+
+    document.querySelector("#create").addEventListener("click", async () => {
+      remember();
+      const response = await fetch("/v1/sessions", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(workspacePayload({})),
+      });
+      if (!response.ok) {
+        statusNode.textContent = "无法新建对话：" + (await response.text());
+        return;
+      }
+      const created = await response.json();
+      await refreshSessions();
+      await openSession(created.sessionId);
+    });
 
     document.querySelector("#composer").addEventListener("submit", async (event) => {
       event.preventDefault();
       remember();
       const prompt = promptInput.value.trim();
       if (!prompt) return;
+      if (!currentSessionId) {
+        statusNode.textContent = "请先新建或选择一段对话";
+        return;
+      }
       sendButton.disabled = true;
       statusNode.textContent = "发送中";
-      const user = addBlock("你", "bubble");
-      user.textContent = prompt;
-      const assistant = addBlock("MewCode", "bubble");
-      const payload = { prompt };
-      const workspace = workspaceInput.value.trim();
-      if (workspace) payload.workspace = workspace;
-      if (sessionId) payload.sessionId = sessionId;
       try {
-        const created = await fetch("/v1/runs", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify(payload),
-        });
+        const created = await fetch(
+          "/v1/sessions/" + encodeURIComponent(currentSessionId) + "/messages",
+          {
+            method: "POST",
+            headers: authHeaders(),
+            body: JSON.stringify(workspacePayload({ prompt })),
+          },
+        );
+        if (created.status === 409) {
+          statusNode.textContent = "这段对话正忙";
+          return;
+        }
         if (!created.ok) {
           statusNode.textContent = "提交失败：" + (await created.text());
           return;
         }
         const run = await created.json();
+        const user = addBlock("你", "bubble");
+        user.textContent = prompt;
+        const assistant = addBlock("MewCode", "bubble");
         statusNode.textContent = "运行中 " + run.runId;
         promptInput.value = "";
         const stream = await fetch("/v1/runs/" + run.runId + "/events", {
@@ -256,12 +315,11 @@
               next.textContent = data.text;
               assistant.prepend(next);
             }
-            if (data.sessionId) sessionId = data.sessionId;
             statusNode.textContent = data.status + (data.error ? "：" + data.error : "");
             remember();
           }
         });
-        await refreshHistory();
+        await refreshSessions();
       } catch (err) {
         statusNode.textContent = "请求失败";
       } finally {
@@ -269,8 +327,9 @@
       }
     });
 
-    document.querySelector("#refresh").addEventListener("click", refreshHistory);
-    refreshHistory();
+    document.querySelector("#refresh").addEventListener("click", refreshSessions);
+    workspaceInput.addEventListener("change", refreshSessions);
+    refreshSessions();
   </script>
 </body>
 </html>

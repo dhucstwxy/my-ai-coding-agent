@@ -329,6 +329,366 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(worker.gave_up)
         self.assertIn("用尽", worker.unavailable_reason() or "")
 
+    def test_create_and_list_session(self) -> None:
+        created = self._create_session()
+        self.assertEqual(created["label"], "新对话")
+        self.assertFalse(created["busy"])
+        listed = self.client.get(
+            "/v1/sessions",
+            params={"workspace": self.workspace},
+        )
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()[0]["sessionId"], created["sessionId"])
+        self.assertEqual(listed.json()[0]["label"], "新对话")
+
+    def test_session_order_and_workspace_isolation(self) -> None:
+        first = self._create_session()
+        second = self._create_session()
+        root = Path(self.workspace) / ".mewcode" / "api-sessions"
+        os.utime(root / f"{first['sessionId']}.jsonl", (1_700_000_000, 1_700_000_000))
+        os.utime(root / f"{second['sessionId']}.jsonl", (1_800_000_000, 1_800_000_000))
+        listed = self.client.get(
+            "/v1/sessions",
+            params={"workspace": self.workspace},
+        ).json()
+        self.assertEqual(listed[0]["sessionId"], second["sessionId"])
+        other = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(other, ignore_errors=True))
+        elsewhere = self.client.get("/v1/sessions", params={"workspace": other})
+        self.assertEqual(elsewhere.status_code, 200)
+        self.assertEqual(elsewhere.json(), [])
+        missing = self.client.get(
+            f"/v1/sessions/{first['sessionId']}",
+            params={"workspace": other},
+        )
+        self.assertEqual(missing.status_code, 404)
+
+    def test_session_messages_hide_tools_and_label(self) -> None:
+        created = self._create_session()
+        session_id = created["sessionId"]
+        sent = self._send(session_id, "只回复 pong")
+        self.assertEqual(sent.status_code, 202)
+        self._wait(sent.json()["runId"])
+        path = (
+            Path(self.workspace)
+            / ".mewcode"
+            / "api-sessions"
+            / f"{session_id}.jsonl"
+        )
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + json.dumps(
+                {
+                    "type": "message",
+                    "id": "tool-1",
+                    "role": "tool",
+                    "content": "secret-tool",
+                    "createdAt": "2026-01-01T00:00:02Z",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        opened = self.client.get(
+            f"/v1/sessions/{session_id}",
+            params={"workspace": self.workspace},
+        )
+        self.assertEqual(opened.status_code, 200)
+        roles = [item["role"] for item in opened.json()["messages"]]
+        self.assertEqual(roles, ["user", "assistant"])
+        self.assertEqual(opened.json()["messages"][0]["content"], "只回复 pong")
+        self.assertEqual(opened.json()["messages"][1]["content"], "pong")
+        self.assertNotIn("secret-tool", opened.text)
+        long_text = "字" * 50
+        path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "session",
+                            "id": session_id,
+                            "title": "新会话",
+                            "createdAt": created["createdAt"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "id": "u-long",
+                            "role": "user",
+                            "content": long_text,
+                            "createdAt": "2026-01-01T00:00:03Z",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        listed = self.client.get(
+            "/v1/sessions",
+            params={"workspace": self.workspace},
+        ).json()
+        matched = next(item for item in listed if item["sessionId"] == session_id)
+        self.assertEqual(matched["label"], ("字" * 40) + "…")
+
+    def test_session_events_and_late_subscribe(self) -> None:
+        created = self._create_session()
+        sent = self._send(created["sessionId"], "USE_TOOL")
+        run_id = sent.json()["runId"]
+        self._wait(run_id)
+        with self.client.stream("GET", f"/v1/runs/{run_id}/events") as resp:
+            body = "".join(resp.iter_text())
+        self.assertIn("event: tool", body)
+        self.assertIn("event: text", body)
+        self.assertIn("event: done", body)
+        self.assertIn("pong", body)
+        self.assertIn("read_file", body)
+
+    def test_session_busy_then_other_session_queues(self) -> None:
+        first = self._create_session()["sessionId"]
+        second = self._create_session()["sessionId"]
+        held = self._send(first, "WAIT_CANCEL")
+        self.assertEqual(held.status_code, 202)
+        busy = self._send(first, "另一句")
+        self.assertEqual(busy.status_code, 409)
+        self.assertIn("正忙", busy.text)
+        queued = self._send(second, "只回复 pong")
+        self.assertEqual(queued.status_code, 202)
+        cancelled = self.client.post(f"/v1/runs/{held.json()['runId']}/cancel")
+        self.assertEqual(cancelled.status_code, 200)
+        self._wait(held.json()["runId"])
+        again = self._send(first, "只回复 pong")
+        self.assertEqual(again.status_code, 202)
+        self._wait(again.json()["runId"])
+
+    def test_session_queue_full_matches_runs(self) -> None:
+        os.environ["MEWCODE_MAX_QUEUED"] = "1"
+        os.environ["MEWCODE_SERVER_DATA"] = str(Path(self.tmp.name) / "session-queue")
+        app = create_app(worker_cmd=[sys.executable, str(FAKE)])
+        with TestClient(app) as client:
+            first = client.post(
+                "/v1/sessions",
+                json={"workspace": self.workspace},
+            ).json()["sessionId"]
+            second = client.post(
+                "/v1/sessions",
+                json={"workspace": self.workspace},
+            ).json()["sessionId"]
+            held = client.post(
+                f"/v1/sessions/{first}/messages",
+                json={"prompt": "WAIT_CANCEL", "workspace": self.workspace},
+            )
+            self.assertEqual(held.status_code, 202)
+            blocked = client.post(
+                f"/v1/sessions/{second}/messages",
+                json={"prompt": "只回复 pong", "workspace": self.workspace},
+            )
+            run_blocked = client.post(
+                "/v1/runs",
+                json={"prompt": "另一个", "workspace": self.workspace},
+            )
+            self.assertEqual(blocked.status_code, 429)
+            self.assertEqual(run_blocked.status_code, 429)
+            self.assertIn("排队任务已满", blocked.text)
+
+    def test_session_errors_and_token(self) -> None:
+        missing = self.client.post(
+            "/v1/sessions",
+            json={"workspace": str(Path(self.workspace) / "nope")},
+        )
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("工作区不存在", missing.text)
+        created = self._create_session()
+        blank = self._send(created["sessionId"], "   ")
+        self.assertEqual(blank.status_code, 422)
+        bad = self.client.get(
+            "/v1/sessions/bad id",
+            params={"workspace": self.workspace},
+        )
+        self.assertEqual(bad.status_code, 400)
+        os.environ["MEWCODE_SERVER_TOKEN"] = "secret"
+        denied = self.client.post(
+            "/v1/sessions",
+            json={"workspace": self.workspace},
+        )
+        self.assertEqual(denied.status_code, 401)
+        denied_list = self.client.get(
+            "/v1/sessions",
+            params={"workspace": self.workspace},
+        )
+        self.assertEqual(denied_list.status_code, 401)
+        opened = self.client.get(
+            f"/v1/sessions/{created['sessionId']}",
+            params={"workspace": self.workspace},
+        )
+        self.assertEqual(opened.status_code, 401)
+        sent = self._send(created["sessionId"], "只回复 pong")
+        self.assertEqual(sent.status_code, 401)
+        health = self.client.get("/health")
+        self.assertEqual(health.status_code, 200)
+        allowed = self.client.get(
+            "/v1/sessions",
+            params={"workspace": self.workspace},
+            headers={"Authorization": "Bearer secret"},
+        )
+        self.assertEqual(allowed.status_code, 200)
+
+    def test_default_workspace_and_worker_down_still_lists(self) -> None:
+        os.environ["MEWCODE_WORKSPACE"] = self.workspace
+        self.addCleanup(lambda: os.environ.pop("MEWCODE_WORKSPACE", None))
+        created = self.client.post("/v1/sessions", json={})
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["workspace"], str(Path(self.workspace).resolve()))
+        os.environ["MEWCODE_SERVER_DATA"] = str(Path(self.tmp.name) / "down-sessions")
+        app = create_app(worker_cmd=[sys.executable, "-c", "import sys; sys.exit(3)"])
+        with TestClient(app) as client:
+            made = client.post("/v1/sessions", json={"workspace": self.workspace})
+            self.assertEqual(made.status_code, 200)
+            listed = client.get("/v1/sessions", params={"workspace": self.workspace})
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(listed.json()[0]["sessionId"], made.json()["sessionId"])
+            denied = client.post(
+                f"/v1/sessions/{made.json()['sessionId']}/messages",
+                json={"prompt": "hi", "workspace": self.workspace},
+            )
+            self.assertEqual(denied.status_code, 503)
+
+    def test_session_survives_restart_without_saved_id(self) -> None:
+        created = self._create_session()
+        sent = self._send(created["sessionId"], "记下这次")
+        self._wait(sent.json()["runId"])
+        app2 = create_app(worker_cmd=[sys.executable, str(FAKE)])
+        with TestClient(app2) as client:
+            listed = client.get("/v1/sessions", params={"workspace": self.workspace})
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(listed.json()[0]["sessionId"], created["sessionId"])
+            opened = client.get(
+                f"/v1/sessions/{created['sessionId']}",
+                params={"workspace": self.workspace},
+            )
+            self.assertEqual(opened.json()["messages"][0]["content"], "记下这次")
+            again = client.post(
+                f"/v1/sessions/{created['sessionId']}/messages",
+                json={"prompt": "只回复 pong", "workspace": self.workspace},
+            )
+            self.assertEqual(again.status_code, 202)
+
+    def test_resume_does_not_duplicate_user_message(self) -> None:
+        session_id = "20260101-000000-abc123"
+        sessions = Path(self.workspace) / ".mewcode" / "api-sessions"
+        sessions.mkdir(parents=True)
+        path = sessions / f"{session_id}.jsonl"
+        path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "session",
+                            "id": session_id,
+                            "title": "新会话",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "id": "already",
+                            "role": "user",
+                            "content": "继续干活",
+                            "createdAt": "2026-01-01T00:00:01Z",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        data = Path(self.tmp.name) / "session-resume"
+        runs = data / "runs"
+        runs.mkdir(parents=True)
+        run_id = "33333333-3333-3333-3333-333333333333"
+        record = {
+            "runId": run_id,
+            "status": "running",
+            "workspace": self.workspace,
+            "prompt": "继续干活",
+            "sessionId": session_id,
+            "timeoutMs": 60000,
+            "sessionsDir": str(sessions),
+            "partialText": "",
+            "error": None,
+            "report": None,
+            "cancelRequested": False,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "startedAt": "2026-01-01T00:00:01Z",
+            "endedAt": None,
+            "inputCommitted": True,
+            "attempt": 0,
+            "idempotencyKey": None,
+        }
+        (runs / f"{run_id}.json").write_text(
+            json.dumps(record, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.environ["MEWCODE_SERVER_DATA"] = str(data)
+        app = create_app(worker_cmd=[sys.executable, str(FAKE)])
+        with TestClient(app) as client:
+            view = self._wait_on(client, run_id)
+            self.assertEqual(view["status"], "completed")
+        users = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        user_hits = [
+            item
+            for item in users
+            if item.get("role") == "user" and item.get("content") == "继续干活"
+        ]
+        self.assertEqual(len(user_hits), 1)
+        self.assertFalse((Path(self.workspace) / ".mewcode" / "sessions").exists())
+
+    def test_failed_turn_keeps_service_and_session(self) -> None:
+        created = self._create_session()
+        failed = self._send(created["sessionId"], "FAIL")
+        view = self._wait(failed.json()["runId"])
+        self.assertEqual(view["status"], "failed")
+        self.assertIn("模型失败", view["error"] or "")
+        health = self.client.get("/health")
+        self.assertEqual(health.status_code, 200)
+        again = self._send(created["sessionId"], "只回复 pong")
+        self.assertEqual(again.status_code, 202)
+        self._wait(again.json()["runId"])
+
+    def test_chat_page_uses_sessions(self) -> None:
+        page = self.client.get("/chat")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("对话", page.text)
+        self.assertIn("/v1/sessions", page.text)
+        self.assertIn("这段对话正忙", page.text)
+        self.assertNotIn("mewcode.sessionId", page.text)
+        self.assertLess(page.text.index("status === 409"), page.text.index('addBlock("你"'))
+
+    def _create_session(self) -> dict:
+        response = self.client.post(
+            "/v1/sessions",
+            json={"workspace": self.workspace},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def _send(self, session_id: str, prompt: str):
+        return self.client.post(
+            f"/v1/sessions/{session_id}/messages",
+            json={"prompt": prompt, "workspace": self.workspace},
+        )
+
     def _wait_on(self, client: TestClient, run_id: str) -> dict:
         last = {}
         for _ in range(50):

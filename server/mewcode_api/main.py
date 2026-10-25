@@ -17,8 +17,18 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from mewcode_api.models import CreateRunBody, CreateRunResponse, RunView
-from mewcode_api.run_manager import TERMINAL, RunManager, RunState
+from mewcode_api.models import (
+    ConversationDetail,
+    ConversationSummary,
+    CreateConversationBody,
+    CreateRunBody,
+    CreateRunResponse,
+    RunView,
+    SendMessageBody,
+    SendMessageResponse,
+)
+from mewcode_api.run_manager import TERMINAL, RunManager, RunState, resolve_workspace
+from mewcode_api.session_catalog import SessionCatalog
 from mewcode_api.settings import Settings
 from mewcode_api.worker_client import WorkerClient
 
@@ -133,6 +143,75 @@ def create_app(worker_cmd: list[str] | None = None) -> FastAPI:
     @app.get("/chat")
     async def chat_page() -> FileResponse:
         return FileResponse(CHAT_HTML)
+
+    @app.post(
+        "/v1/sessions",
+        response_model=ConversationSummary,
+        dependencies=[Depends(require_token)],
+    )
+    async def create_session(
+        body: CreateConversationBody,
+        request: Request,
+    ) -> ConversationSummary:
+        workspace = resolve_workspace(
+            body.workspace,
+            get_manager(request).settings.allowed_roots,
+        )
+        return SessionCatalog().create(workspace)
+
+    @app.get(
+        "/v1/sessions",
+        response_model=list[ConversationSummary],
+        dependencies=[Depends(require_token)],
+    )
+    async def list_sessions(
+        request: Request,
+        workspace: str | None = Query(default=None),
+    ) -> list[ConversationSummary]:
+        manager = get_manager(request)
+        root = resolve_workspace(workspace, manager.settings.allowed_roots)
+        return SessionCatalog().list(root, manager.busy_session_ids())
+
+    @app.get(
+        "/v1/sessions/{session_id}",
+        response_model=ConversationDetail,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_session(
+        session_id: str,
+        request: Request,
+        workspace: str | None = Query(default=None),
+    ) -> ConversationDetail:
+        manager = get_manager(request)
+        root = resolve_workspace(workspace, manager.settings.allowed_roots)
+        detail = SessionCatalog().get(root, session_id)
+        if detail.sessionId in manager.busy_session_ids():
+            detail.busy = True
+        return detail
+
+    @app.post(
+        "/v1/sessions/{session_id}/messages",
+        status_code=202,
+        response_model=SendMessageResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def send_message(
+        session_id: str,
+        body: SendMessageBody,
+        request: Request,
+    ) -> SendMessageResponse:
+        manager = get_manager(request)
+        root = resolve_workspace(body.workspace, manager.settings.allowed_roots)
+        detail = SessionCatalog().get(root, session_id)
+        run, position = manager.submit_for_session(root, detail.sessionId, body.prompt)
+        current_run_id.set(run.run_id)
+        return SendMessageResponse(
+            sessionId=detail.sessionId,
+            runId=run.run_id,
+            status=run.status,
+            workspace=str(root),
+            position=position,
+        )
 
     @app.post(
         "/v1/runs/wait",
