@@ -72,6 +72,7 @@ class ApiTests(unittest.TestCase):
         listed = self.client.get("/v1/runs")
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.json()[0]["runId"], run_id)
+        self.assertFalse(list(Path(self.data_dir).glob("runs/*.json")))
 
     def test_sse_replays_done(self) -> None:
         created = self.client.post(
@@ -142,6 +143,8 @@ class ApiTests(unittest.TestCase):
             headers={"Authorization": "Bearer secret"},
         )
         self.assertEqual(allowed.status_code, 200)
+        denied_steps = self.client.get("/v1/runs/missing/steps")
+        self.assertEqual(denied_steps.status_code, 401)
         open_health = self.client.get("/health")
         self.assertEqual(open_health.status_code, 200)
 
@@ -242,13 +245,18 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(view.json()["report"]["finalMessage"], "pong")
             with client.stream("GET", f"/v1/runs/{run_id}/events") as resp:
                 body = "".join(resp.iter_text())
-            self.assertIn("event: text", body)
+            self.assertIn("event: done", body)
             self.assertIn("pong", body)
+            self.assertNotIn("event: text", body)
+            steps = client.get(f"/v1/runs/{run_id}/steps")
+            self.assertEqual(steps.status_code, 200)
+            self.assertEqual(steps.json(), [{"seq": 1, "kind": "text", "text": "pong"}])
 
     def test_resume_and_cancelled_stay(self) -> None:
+        from mewcode_api.task_store import TaskStore
+
         data = Path(self.tmp.name) / "resume-data"
-        runs = data / "runs"
-        runs.mkdir(parents=True)
+        data.mkdir()
         run_id = "11111111-1111-1111-1111-111111111111"
         record = {
             "runId": run_id,
@@ -269,8 +277,14 @@ class ApiTests(unittest.TestCase):
             "attempt": 0,
             "idempotencyKey": None,
         }
-        (runs / f"{run_id}.json").write_text(
-            json.dumps(record, ensure_ascii=False),
+        store = TaskStore(data)
+        store.save_task(record)
+        store.append_step(run_id, {"kind": "thinking", "text": "已记下"})
+        store.close()
+        old = data / "runs"
+        old.mkdir()
+        (old / "old.json").write_text(
+            json.dumps({"runId": "old-json", "status": "completed"}),
             encoding="utf-8",
         )
         os.environ["MEWCODE_SERVER_DATA"] = str(data)
@@ -280,6 +294,13 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(view["status"], "completed")
             self.assertEqual(view["sessionId"], "sess-keep")
             self.assertTrue(view["report"]["resumed"])
+            listed = [item["runId"] for item in client.get("/v1/runs").json()]
+            self.assertIn(run_id, listed)
+            self.assertNotIn("old-json", listed)
+            self.assertTrue((old / "old.json").is_file())
+            kept = client.get(f"/v1/runs/{run_id}/steps").json()
+            self.assertEqual(kept[0], {"seq": 1, "kind": "thinking", "text": "已记下"})
+            self.assertEqual(kept[-1], {"seq": 2, "kind": "text", "text": "pong"})
 
         cancelled_id = "22222222-2222-2222-2222-222222222222"
         cancelled = dict(record)
@@ -287,13 +308,12 @@ class ApiTests(unittest.TestCase):
         cancelled["status"] = "cancelled"
         cancelled["cancelRequested"] = True
         cancelled["endedAt"] = "2026-01-01T00:01:00Z"
-        cancel_dir = Path(self.tmp.name) / "cancel-data" / "runs"
-        cancel_dir.mkdir(parents=True)
-        (cancel_dir / f"{cancelled_id}.json").write_text(
-            json.dumps(cancelled, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        os.environ["MEWCODE_SERVER_DATA"] = str(cancel_dir.parent)
+        cancel_data = Path(self.tmp.name) / "cancel-data"
+        cancel_data.mkdir()
+        cancelled_store = TaskStore(cancel_data)
+        cancelled_store.save_task(cancelled)
+        cancelled_store.close()
+        os.environ["MEWCODE_SERVER_DATA"] = str(cancel_data)
         app2 = create_app(worker_cmd=[sys.executable, str(FAKE)])
         with TestClient(app2) as client:
             view = client.get(f"/v1/runs/{cancelled_id}")
@@ -315,6 +335,9 @@ class ApiTests(unittest.TestCase):
                 json={"prompt": "hi", "workspace": self.workspace},
             )
             self.assertEqual(denied.status_code, 503)
+            listed = client.get("/v1/runs")
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(listed.json(), [])
 
     def test_restart_budget(self) -> None:
         import asyncio
@@ -610,8 +633,7 @@ class ApiTests(unittest.TestCase):
             encoding="utf-8",
         )
         data = Path(self.tmp.name) / "session-resume"
-        runs = data / "runs"
-        runs.mkdir(parents=True)
+        data.mkdir()
         run_id = "33333333-3333-3333-3333-333333333333"
         record = {
             "runId": run_id,
@@ -632,10 +654,11 @@ class ApiTests(unittest.TestCase):
             "attempt": 0,
             "idempotencyKey": None,
         }
-        (runs / f"{run_id}.json").write_text(
-            json.dumps(record, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        from mewcode_api.task_store import TaskStore
+
+        store = TaskStore(data)
+        store.save_task(record)
+        store.close()
         os.environ["MEWCODE_SERVER_DATA"] = str(data)
         app = create_app(worker_cmd=[sys.executable, str(FAKE)])
         with TestClient(app) as client:
@@ -674,9 +697,83 @@ class ApiTests(unittest.TestCase):
         self.assertIn("这段对话正忙", page.text)
         self.assertNotIn("mewcode.sessionId", page.text)
         self.assertLess(page.text.index("status === 409"), page.text.index('addBlock("你"'))
+        self.assertLess(page.text.index('class="history"'), page.text.index('id="thread"'))
+        self.assertIn("flex-direction: row", page.text)
+        self.assertNotIn("/steps", page.text)
         self.assertIn("/approval", page.text)
         for label in ("拒绝", "仅本次放行", "本会话放行", "永久放行"):
             self.assertIn(label, page.text)
+
+    def test_steps_survive_restart_and_skip_deltas(self) -> None:
+        created = self._create_session()
+        held = self._send(created["sessionId"], "STEPS_HOLD")
+        self.assertEqual(held.status_code, 202)
+        held_id = held.json()["runId"]
+        saw_open_tool = False
+        for _ in range(40):
+            steps = self.client.get(f"/v1/runs/{held_id}/steps")
+            self.assertEqual(steps.status_code, 200)
+            kinds = [item["kind"] for item in steps.json()]
+            if kinds == ["thinking"]:
+                events = self.app.state.manager.get(held_id).events
+                self.assertFalse(any(item.get("event") == "done" for item in events))
+                saw_open_tool = True
+                break
+            if "tool" in kinds:
+                break
+            time.sleep(0.05)
+        self.assertTrue(saw_open_tool)
+        finished = self._wait(held_id)
+        self.assertEqual(finished["status"], "completed")
+        closed = self.client.get(f"/v1/runs/{held_id}/steps").json()
+        self.assertEqual([item["kind"] for item in closed], ["thinking", "tool", "text"])
+        self.assertEqual(closed[1]["tool"], "read_file")
+        self.assertEqual(closed[1]["subject"], "a.txt")
+        self.assertIs(closed[1]["ok"], True)
+        self.assertEqual(closed[1]["summary"], "读完了")
+
+        sent = self._send(created["sessionId"], "STEPS")
+        self.assertEqual(sent.status_code, 202)
+        run_id = sent.json()["runId"]
+        self._wait(run_id)
+        steps = self.client.get(f"/v1/runs/{run_id}/steps")
+        self.assertEqual(steps.status_code, 200)
+        body = steps.json()
+        self.assertEqual([item["kind"] for item in body], ["thinking", "tool", "text"])
+        self.assertEqual(body[0]["text"], "先看文件")
+        self.assertEqual(body[1]["warnings"], ["工具提示"])
+        self.assertEqual(body[1]["approval"]["status"], "allowed")
+        self.assertEqual(body[1]["approval"]["choice"], "once")
+        self.assertNotIn("启动提示", json.dumps(body, ensure_ascii=False))
+        self.assertEqual(body[2]["text"], "第一步完成")
+        self.assertEqual(len(body), 3)
+
+        data = os.environ["MEWCODE_SERVER_DATA"]
+        app2 = create_app(worker_cmd=[sys.executable, str(FAKE)])
+        with TestClient(app2) as client:
+            again = client.get(f"/v1/runs/{run_id}/steps")
+            self.assertEqual(again.status_code, 200)
+            self.assertEqual(again.json(), body)
+        os.environ["MEWCODE_SERVER_DATA"] = data
+
+        missing = self.client.get("/v1/runs/does-not-exist/steps")
+        self.assertEqual(missing.status_code, 404)
+
+    def test_task_store_unavailable_rejects_submit(self) -> None:
+        blocked = Path(self.tmp.name) / "blocked-data"
+        blocked.mkdir()
+        (blocked / "tasks.sqlite").write_text("不是数据库", encoding="utf-8")
+        os.environ["MEWCODE_SERVER_DATA"] = str(blocked)
+        app = create_app(worker_cmd=[sys.executable, str(FAKE)])
+        with TestClient(app) as client:
+            health = client.get("/health")
+            self.assertEqual(health.status_code, 200)
+            denied = client.post(
+                "/v1/runs",
+                json={"prompt": "hi", "workspace": self.workspace},
+            )
+            self.assertEqual(denied.status_code, 503)
+            self.assertIn("任务库不可用", denied.text)
 
     def test_session_approval_choices_and_conflicts(self) -> None:
         created = self._create_session()

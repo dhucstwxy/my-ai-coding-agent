@@ -27,6 +27,8 @@ export type StreamEvent =
       name: string;
       ok: boolean;
       resultSummary: string;
+      /** 这次调用的权限主体。算不出来时省略。 */
+      subject?: string;
     }
   | { type: "tool_calls_ignored"; names: string[] }
   | {

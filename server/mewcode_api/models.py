@@ -97,3 +97,15 @@ class RunView(BaseModel):
     createdAt: str
     startedAt: str | None = None
     endedAt: str | None = None
+
+
+class StepView(BaseModel):
+    seq: int
+    kind: Literal["thinking", "tool", "text"]
+    text: str | None = None
+    tool: str | None = None
+    subject: str | None = None
+    ok: bool | None = None
+    summary: str | None = None
+    approval: dict[str, Any] | None = None
+    warnings: list[str] | None = None

@@ -27,6 +27,7 @@ from mewcode_api.models import (
     RunView,
     SendMessageBody,
     SendMessageResponse,
+    StepView,
 )
 from mewcode_api.run_manager import TERMINAL, RunManager, RunState, resolve_workspace
 from mewcode_api.session_catalog import SessionCatalog
@@ -85,6 +86,8 @@ def create_app(worker_cmd: list[str] | None = None) -> FastAPI:
                 await retry_task
             with suppress(asyncio.CancelledError):
                 await loop_task
+            if manager.store is not None:
+                manager.store.close()
 
     app = FastAPI(
         title="MewCode Agent API",
@@ -270,6 +273,19 @@ def create_app(worker_cmd: list[str] | None = None) -> FastAPI:
     async def get_run(run_id: str, request: Request) -> RunView:
         current_run_id.set(run_id)
         return RunView.model_validate(get_manager(request).get(run_id).to_dict())
+
+    @app.get(
+        "/v1/runs/{run_id}/steps",
+        response_model=list[StepView],
+        response_model_exclude_none=True,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_steps(run_id: str, request: Request) -> list[StepView]:
+        current_run_id.set(run_id)
+        return [
+            StepView.model_validate(item)
+            for item in get_manager(request).steps(run_id)
+        ]
 
     @app.post(
         "/v1/runs/{run_id}/cancel",

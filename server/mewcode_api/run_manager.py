@@ -16,7 +16,8 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from mewcode_api.models import RunStatus
-from mewcode_api.run_store import RunStore
+from mewcode_api.step_collector import StepCollector
+from mewcode_api.task_store import TaskStore, TaskStoreError
 from mewcode_api.settings import (
     DEFAULT_TIMEOUT_MS,
     EVENT_BUFFER_LIMIT,
@@ -117,6 +118,7 @@ class RunState:
     approval_answered: bool = False
     events: list[dict[str, Any]] = field(default_factory=list)
     subscribers: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
+    collector: StepCollector = field(default_factory=StepCollector)
 
     def __post_init__(self) -> None:
         self.done = asyncio.Event()
@@ -149,6 +151,7 @@ class RunState:
             "idempotencyKey": self.idempotency_key,
             "prompt": self.prompt,
             "sessionTurn": self.session_turn,
+            "resume": self.resume,
         }
 
     def done_payload(self) -> dict[str, Any]:
@@ -223,7 +226,11 @@ class RunManager:
     def __init__(self, worker: WorkerClient, settings: Settings):
         self.worker = worker
         self.settings = settings
-        self.store = RunStore(settings.data_dir)
+        try:
+            self.store: TaskStore | None = TaskStore(settings.data_dir)
+        except TaskStoreError as exc:
+            log.error("%s", exc)
+            self.store = None
         self.runs: dict[str, RunState] = {}
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.running_id: str | None = None
@@ -238,6 +245,7 @@ class RunManager:
         timeout_ms: int | None,
         idempotency_key: str | None = None,
     ) -> tuple[RunState, int]:
+        self._require_store()
         self._require_worker()
         key = check_idempotency_key(idempotency_key)
         if key:
@@ -291,6 +299,7 @@ class RunManager:
         prompt: str,
     ) -> tuple[RunState, int]:
         """为已有对话排入一轮。检查和入队在同一次调用里完成。"""
+        self._require_store()
         self._require_worker()
         checked = check_session_id(session_id)
         if checked is None:
@@ -346,8 +355,7 @@ class RunManager:
         if run.status in TERMINAL:
             return run
         if run.status == "queued":
-            run.finish("cancelled", error="已取消")
-            self._remember(run)
+            self._complete(run, "cancelled", error="已取消")
             return run
         if run.accepts_cancel:
             await self.worker.cancel(run.run_id)
@@ -370,8 +378,7 @@ class RunManager:
                 log.exception("执行失败 run=%s", run_id)
                 run = self.runs.get(run_id)
                 if run is not None:
-                    run.finish("failed", error=str(exc))
-                    self._remember(run)
+                    self._complete(run, "failed", error=str(exc))
             finally:
                 self.queue.task_done()
 
@@ -379,27 +386,24 @@ class RunManager:
         if self._restored:
             return
         self._restored = True
-        for record in self.store.load_records():
+        for record in self._load_saved_tasks():
             run = self._run_from_record(record)
             self.runs[run.run_id] = run
             if run.status in TERMINAL:
                 continue
             if run.status == "running" and run.cancel_requested:
-                run.finish("cancelled", error="已取消")
-                self._remember(run)
+                self._complete(run, "cancelled", error="已取消")
                 continue
             if run.status == "running":
                 run.attempt += 1
                 if run.attempt > self.settings.max_resume_attempts:
-                    run.finish("failed", error="多次中断")
-                    self._remember(run)
+                    self._complete(run, "failed", error="多次中断")
                     continue
                 run.resume = bool(run.input_committed and run.session_id)
                 run.status = "queued"
                 run.partial_text = ""
                 run.events.clear()
                 run.started_at = None
-                self.store.clear_events(run.run_id)
                 self._persist(run)
             self.queue.put_nowait(run.run_id)
             log.info(
@@ -431,8 +435,7 @@ class RunManager:
             deadline = run.timeout_ms / 1000 + 30
             await asyncio.wait_for(self._consume(run), deadline)
         except TimeoutError:
-            run.finish("failed", error="worker 超时无响应")
-            self._remember(run)
+            self._complete(run, "failed", error="worker 超时无响应")
             try:
                 await self.worker.restart()
             except Exception:
@@ -480,7 +483,7 @@ class RunManager:
                 message = msg.get("message")
                 if isinstance(message, str) and message:
                     run.publish({"event": "warning", "data": {"message": message}})
-                    self._remember_event(run)
+                    run.collector.note_warning(message)
                 continue
             if kind == "result":
                 report = msg.get("report") if isinstance(msg.get("report"), dict) else {}
@@ -488,11 +491,11 @@ class RunManager:
                 return
             if kind == "error":
                 message = msg.get("message")
-                run.finish(
+                self._complete(
+                    run,
                     "failed",
                     error=message if isinstance(message, str) and message else "worker 错误",
                 )
-                self._remember(run)
                 return
 
     def _on_agent_event(self, run: RunState, event: dict[str, Any]) -> None:
@@ -501,11 +504,12 @@ class RunManager:
             self._persist(run)
         event_type = event.get("type")
         if event_type == "text_delta" and isinstance(event.get("text"), str):
+            run.collector.observe(event)
             run.append_text(event["text"])
             run.publish({"event": "text", "data": {"delta": event["text"]}})
-            self._remember_event(run)
             self._maybe_flush_partial(run)
         elif event_type == "tool_execution_start":
+            self._commit_step(run, run.collector.observe(event))
             run.publish(
                 {
                     "event": "tool",
@@ -516,8 +520,8 @@ class RunManager:
                     },
                 }
             )
-            self._remember_event(run)
         elif event_type == "tool_execution_end":
+            self._commit_step(run, run.collector.observe(event))
             run.publish(
                 {
                     "event": "tool",
@@ -530,9 +534,9 @@ class RunManager:
                     },
                 }
             )
-            self._remember_event(run)
+        elif event_type == "thinking_end":
+            self._commit_step(run, run.collector.observe(event))
         run.publish({"event": "agent", "data": event})
-        self._remember_event(run)
 
     def _on_approval(self, run: RunState, msg: dict[str, Any]) -> None:
         approval_id = msg.get("approvalId")
@@ -566,7 +570,7 @@ class RunManager:
             if run.pending_approval_id == approval_id:
                 run.pending_approval_id = None
         run.publish({"event": "approval", "data": data})
-        self._remember_event(run)
+        run.collector.note_approval(data)
 
     async def answer_approval(self, run_id: str, approval_id: str, choice: str) -> RunState:
         run = self.get(run_id)
@@ -600,8 +604,50 @@ class RunManager:
             status = "completed"
         else:
             status = "failed"
-        run.finish(status, error=error_text, report=report)
+        self._complete(run, status, error=error_text, report=report)
+
+    def steps(self, run_id: str) -> list[dict[str, Any]]:
+        self.get(run_id)
+        self._require_store()
+        assert self.store is not None
+        return self.store.load_steps(run_id)
+
+    def _require_store(self) -> None:
+        if self.store is None:
+            raise HTTPException(status_code=503, detail="任务库不可用")
+
+    def _load_saved_tasks(self) -> list[dict[str, Any]]:
+        if self.store is None:
+            log.warning("任务库不可用")
+            return []
+        try:
+            return self.store.load_tasks()
+        except TaskStoreError as exc:
+            log.warning("%s", exc)
+            return []
+
+    def _complete(
+        self,
+        run: RunState,
+        status: RunStatus,
+        error: str | None = None,
+        report: dict[str, Any] | None = None,
+    ) -> None:
+        if run.status not in TERMINAL:
+            self._commit_step(run, run.collector.flush())
+        run.finish(status, error=error, report=report)
         self._remember(run)
+
+    def _commit_step(self, run: RunState, step: dict[str, Any] | None) -> None:
+        if not step:
+            return
+        if self.store is None:
+            log.warning("任务库不可用，步骤未写入 run=%s", run.run_id)
+            return
+        try:
+            self.store.append_step(run.run_id, step)
+        except TaskStoreError as exc:
+            log.warning("写入步骤失败 run=%s：%s", run.run_id, exc)
 
     def _require_worker(self) -> None:
         reason = self.worker.unavailable_reason()
@@ -631,22 +677,20 @@ class RunManager:
         self._persist(run)
 
     def _persist(self, run: RunState) -> None:
-        try:
-            self.store.save_record(run.to_record())
-        except OSError as exc:
-            log.warning("写入运行记录失败 run=%s：%s", run.run_id, exc)
-
-    def _remember_event(self, run: RunState) -> None:
-        if not run.events:
+        if self.store is None:
+            log.warning("任务库不可用，任务未写入 run=%s", run.run_id)
             return
         try:
-            self.store.append_event(run.run_id, run.events[-1])
-        except OSError as exc:
-            log.warning("写入事件失败 run=%s：%s", run.run_id, exc)
+            self.store.save_task(run.to_record())
+        except (OSError, TaskStoreError) as exc:
+            log.warning("写入任务失败 run=%s：%s", run.run_id, exc)
+
+    def _remember_event(self, run: RunState) -> None:
+        """细粒度事件只留在内存，供同一次进程里的订阅者回放。"""
+        return
 
     def _remember(self, run: RunState) -> None:
         self._persist(run)
-        self._remember_event(run)
 
     def _run_from_record(self, record: dict[str, Any]) -> RunState:
         workspace = str(record.get("workspace") or "")
@@ -681,5 +725,5 @@ class RunManager:
             ),
             session_turn=record.get("sessionTurn") is True,
         )
-        run.events = self.store.load_events(run.run_id, EVENT_BUFFER_LIMIT)
+        run.resume = bool(record.get("resume"))
         return run

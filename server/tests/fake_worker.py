@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -60,8 +61,87 @@ def append_saved_turn(msg: dict) -> None:
             handle.write(json.dumps(line, ensure_ascii=False) + "\n")
 
 
+def emit_warning(request_id: str, message: str) -> None:
+    emit({"type": "warning", "requestId": request_id, "message": message})
+
+
+def emit_steps(msg: dict, request_id: str, hold: bool) -> None:
+    """发出思考、工具和正文。hold 时在工具结束前停住，方便查询未完成步骤。"""
+    session_id = msg.get("sessionId") or "sess-new"
+    emit({"type": "session", "requestId": request_id, "sessionId": session_id})
+    emit_warning(request_id, "启动提示")
+    emit(
+        {
+            "type": "event",
+            "requestId": request_id,
+            "event": {"type": "thinking_end", "summary": "先看文件"},
+        }
+    )
+    emit(
+        {
+            "type": "event",
+            "requestId": request_id,
+            "event": {
+                "type": "tool_execution_start",
+                "id": "tool-1",
+                "name": "read_file",
+                "argsSummary": "a.txt",
+            },
+        }
+    )
+    if not hold:
+        emit_approval(request_id, "allowed", "once")
+        emit_warning(request_id, "工具提示")
+    else:
+        time.sleep(1)
+    emit(
+        {
+            "type": "event",
+            "requestId": request_id,
+            "event": {
+                "type": "tool_execution_end",
+                "id": "tool-1",
+                "name": "read_file",
+                "subject": "a.txt",
+                "ok": True,
+                "resultSummary": "读完了",
+            },
+        }
+    )
+    emit(
+        {
+            "type": "event",
+            "requestId": request_id,
+            "event": {"type": "text_delta", "text": "第一步"},
+        }
+    )
+    emit(
+        {
+            "type": "event",
+            "requestId": request_id,
+            "event": {"type": "text_delta", "text": "完成"},
+        }
+    )
+    result(
+        request_id,
+        0,
+        {
+            "stopReason": "completed",
+            "error": None,
+            "sessionId": session_id,
+            "finalMessage": "第一步完成",
+            "exitCode": 0,
+            "steps": 3,
+            "tools": [],
+        },
+    )
+
+
 def complete(msg: dict, request_id: str) -> None:
     prompt = msg.get("prompt") or ""
+    if prompt in {"STEPS", "STEPS_HOLD"}:
+        emit_steps(msg, request_id, hold=prompt == "STEPS_HOLD")
+        return
     session_id = msg.get("sessionId") or "sess-new"
     if prompt == "FAIL":
         emit({"type": "session", "requestId": request_id, "sessionId": session_id})

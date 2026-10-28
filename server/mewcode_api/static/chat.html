@@ -21,7 +21,24 @@
       background: var(--bg);
       color: var(--ink);
     }
-    header, main { max-width: 880px; margin: 0 auto; padding: 20px; }
+    header, main { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .workspace {
+      display: flex;
+      flex-direction: row;
+      align-items: flex-start;
+      gap: 16px;
+    }
+    .stage { flex: 1; min-width: 0; }
+    .history {
+      width: 220px;
+      flex: none;
+      max-height: calc(100vh - 120px);
+      overflow: auto;
+    }
+    @media (max-width: 800px) {
+      .workspace { flex-direction: row; }
+      .history { width: 132px; }
+    }
     header { padding-bottom: 0; }
     h1 { font-size: 22px; margin: 0 0 4px; }
     p { color: var(--muted); margin: 0; }
@@ -90,25 +107,29 @@
     <p>本地 Coding Agent。文字会在任务结束前逐步出现。</p>
   </header>
   <main>
-    <form id="composer">
-      <label for="workspace">工作区</label>
-      <input id="workspace" name="workspace" placeholder="留空则使用服务端当前目录" />
-      <label for="token">访问令牌</label>
-      <input id="token" name="token" type="password" placeholder="未设置 MEWCODE_SERVER_TOKEN 时留空" />
-      <label for="prompt">任务</label>
-      <textarea id="prompt" name="prompt" required placeholder="说明要做的修改"></textarea>
-      <div class="row">
-        <button type="submit" id="send">发送</button>
-        <button type="button" class="secondary" id="create">新建对话</button>
-        <button type="button" class="secondary" id="refresh">刷新对话</button>
+    <div class="workspace">
+      <section class="history">
+        <strong>对话</strong>
+        <div id="history"></div>
+      </section>
+      <div class="stage">
+        <form id="composer">
+          <label for="workspace">工作区</label>
+          <input id="workspace" name="workspace" placeholder="留空则使用服务端当前目录" />
+          <label for="token">访问令牌</label>
+          <input id="token" name="token" type="password" placeholder="未设置 MEWCODE_SERVER_TOKEN 时留空" />
+          <label for="prompt">任务</label>
+          <textarea id="prompt" name="prompt" required placeholder="说明要做的修改"></textarea>
+          <div class="row">
+            <button type="submit" id="send">发送</button>
+            <button type="button" class="secondary" id="create">新建对话</button>
+            <button type="button" class="secondary" id="refresh">刷新对话</button>
+          </div>
+          <p class="status" id="status"></p>
+        </form>
+        <section class="thread" id="thread"></section>
       </div>
-      <p class="status" id="status"></p>
-    </form>
-    <section class="thread" id="thread"></section>
-    <section class="history">
-      <strong>对话</strong>
-      <div id="history"></div>
-    </section>
+    </div>
   </main>
   <script>
     const workspaceInput = document.querySelector("#workspace");

@@ -8,6 +8,24 @@ import type { AgentEvent, CollectedToolCall } from "./types.js";
 
 const SUMMARY_MAX = 200;
 
+function executionSubject(call: CollectedToolCall): string | undefined {
+  const subject = permissionSubject(call.name, call.arguments);
+  if (!subject.ok) return undefined;
+  return subject.subject;
+}
+
+function toolEnd(call: CollectedToolCall, result: ToolResult): AgentEvent {
+  const subject = executionSubject(call);
+  return {
+    type: "tool_execution_end",
+    id: call.id,
+    name: call.name,
+    ok: result.ok,
+    resultSummary: summarizeResult(result.content),
+    ...(subject !== undefined ? { subject } : {}),
+  };
+}
+
 export interface SchedulerResult {
   /** 本批是否全部为未知工具 */
   unknownCount: number;
@@ -109,13 +127,7 @@ export async function* executeToolBatch(
     );
 
     for (const item of settled) {
-      yield {
-        type: "tool_execution_end",
-        id: item.call.id,
-        name: item.call.name,
-        ok: item.result.ok,
-        resultSummary: summarizeResult(item.result.content),
-      };
+      yield toolEnd(item.call, item.result);
       await dispatchPostTool(hooks, item.call);
       results.push(item);
     }
@@ -135,13 +147,7 @@ export async function* executeToolBatch(
       argsSummary: summarizeArgs(call.arguments),
     };
     const result = await runOne(call, registry, ctx);
-    yield {
-      type: "tool_execution_end",
-      id: call.id,
-      name: call.name,
-      ok: result.ok,
-      resultSummary: summarizeResult(result.content),
-    };
+    yield toolEnd(call, result);
     await dispatchPostTool(hooks, call);
     results.push({ call, result, unknown: false });
   }
@@ -245,13 +251,7 @@ async function* emitExecution(
     name: call.name,
     argsSummary: summarizeArgs(call.arguments),
   };
-  yield {
-    type: "tool_execution_end",
-    id: call.id,
-    name: call.name,
-    ok: result.ok,
-    resultSummary: summarizeResult(result.content),
-  };
+  yield toolEnd(call, result);
 }
 
 async function dispatchPostTool(
