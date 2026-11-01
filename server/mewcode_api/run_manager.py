@@ -38,6 +38,28 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def task_duration_ms(created_at: str, ended_at: str | None) -> int:
+    """从任务创建到这条日志的毫秒数。已结束的任务用结束时间，避免之后再变。"""
+    start = parse_iso(created_at)
+    end = parse_iso(ended_at) if ended_at else datetime.now(timezone.utc)
+    if start is None or end is None:
+        return 0
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def log_task(event: str, run: RunState, message: str) -> None:
+    log.info(
+        message,
+        extra={
+            "event": event,
+            "runId": run.run_id,
+            "sessionId": run.session_id,
+            "status": run.status,
+            "durationMs": task_duration_ms(run.created_at, run.ended_at),
+        },
+    )
+
+
 def parse_iso(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -276,12 +298,7 @@ class RunManager:
         self._persist(run)
         self.queue.put_nowait(run.run_id)
         position = self.queue.qsize()
-        log.info(
-            "排队 run=%s workspace=%s prompt_len=%s",
-            run.run_id,
-            run.workspace,
-            len(prompt),
-        )
+        log_task("task.submit", run, "任务提交")
         return run, position
 
     def busy_session_ids(self) -> set[str]:
@@ -322,13 +339,7 @@ class RunManager:
         self._persist(run)
         self.queue.put_nowait(run.run_id)
         position = self.queue.qsize()
-        log.info(
-            "排队会话 run=%s session=%s workspace=%s prompt_len=%s",
-            run.run_id,
-            checked,
-            run.workspace,
-            len(prompt),
-        )
+        log_task("task.submit", run, "任务提交")
         return run, position
 
     async def wait_for(self, run: RunState) -> RunState:
@@ -360,6 +371,22 @@ class RunManager:
         if run.accepts_cancel:
             await self.worker.cancel(run.run_id)
         return run
+
+    def readiness_error(self) -> str | None:
+        """执行器可用且任务库能读时返回空。否则返回中文原因。"""
+        reasons: list[str] = []
+        if not self.worker.healthy:
+            reasons.append(self.worker.unavailable_reason() or "执行器不可用")
+        if self.store is None:
+            reasons.append("任务库不可用")
+        else:
+            try:
+                self.store.ping()
+            except TaskStoreError:
+                reasons.append("任务库不可用")
+        if not reasons:
+            return None
+        return "；".join(reasons)
 
     def stop(self) -> None:
         self._stopped = True
@@ -423,6 +450,7 @@ class RunManager:
             run.started_at = now_iso()
         self.running_id = run.run_id
         self._persist(run)
+        log_task("task.start", run, "任务开始")
         run.publish(
             {
                 "event": "status",
@@ -633,9 +661,14 @@ class RunManager:
         error: str | None = None,
         report: dict[str, Any] | None = None,
     ) -> None:
-        if run.status not in TERMINAL:
+        already_done = run.status in TERMINAL
+        if not already_done:
             self._commit_step(run, run.collector.flush())
         run.finish(status, error=error, report=report)
+        if not already_done:
+            event = "task.fail" if run.status == "failed" else "task.end"
+            message = "任务失败" if run.status == "failed" else "任务结束"
+            log_task(event, run, message)
         self._remember(run)
 
     def _commit_step(self, run: RunState, step: dict[str, Any] | None) -> None:

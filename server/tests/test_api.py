@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -16,6 +17,7 @@ if str(SERVER_DIR) not in sys.path:
 
 from fastapi.testclient import TestClient
 
+from mewcode_api.jsonlog import JsonLineFormatter
 from mewcode_api.main import create_app, ensure_bind_token
 
 FAKE = Path(__file__).with_name("fake_worker.py")
@@ -78,7 +80,10 @@ class ApiTests(unittest.TestCase):
     def test_health_and_one_shot(self) -> None:
         health = self.client.get("/health")
         self.assertEqual(health.status_code, 200)
-        self.assertEqual(health.json()["worker"], "ready")
+        self.assertEqual(health.json()["status"], "ok")
+        ready = self.client.get("/ready")
+        self.assertEqual(ready.status_code, 200)
+        self.assertEqual(ready.json()["status"], "ok")
 
         created = self.client.post(
             "/v1/runs",
@@ -96,6 +101,64 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.json()[0]["runId"], run_id)
         self.assertFalse(list(Path(self.data_dir).glob("runs/*.json")))
+
+    def test_task_logs_carry_run_fields(self) -> None:
+        captured: list[logging.LogRecord] = []
+
+        class Grab(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                captured.append(record)
+
+        handler = Grab()
+        logger = logging.getLogger("mewcode.runs")
+        previous_level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        self.addCleanup(logger.setLevel, previous_level)
+
+        created = self.client.post(
+            "/v1/runs",
+            json={"prompt": "只回复 pong", "workspace": self.workspace},
+        )
+        run_id = created.json()["runId"]
+        self._wait(run_id)
+        events = [
+            record
+            for record in captured
+            if getattr(record, "event", None) in {"task.submit", "task.start", "task.end", "task.fail"}
+        ]
+        self.assertEqual([record.event for record in events], ["task.submit", "task.start", "task.end"])
+        end = events[-1]
+        self.assertEqual(end.runId, run_id)
+        self.assertEqual(end.sessionId, "sess-new")
+        self.assertEqual(end.status, "completed")
+        self.assertGreaterEqual(end.durationMs, 0)
+        line = JsonLineFormatter().format(end)
+        self.assertNotIn("\n", line)
+        payload = json.loads(line)
+        self.assertEqual(payload["runId"], run_id)
+        self.assertEqual(payload["durationMs"], end.durationMs)
+
+        captured.clear()
+        failed = self.client.post(
+            "/v1/runs",
+            json={"prompt": "FAIL", "workspace": self.workspace},
+        )
+        failed_id = failed.json()["runId"]
+        failed_view = self._wait(failed_id)
+        self.assertEqual(failed_view["status"], "failed")
+        fail_events = [
+            record.event
+            for record in captured
+            if getattr(record, "event", "").startswith("task.")
+        ]
+        self.assertEqual(fail_events, ["task.submit", "task.start", "task.fail"])
+        failed_record = next(record for record in captured if record.event == "task.fail")
+        self.assertEqual(failed_record.runId, failed_id)
+        self.assertEqual(failed_record.sessionId, "sess-new")
+        self.assertEqual(failed_record.status, "failed")
+        self.assertGreaterEqual(failed_record.durationMs, 0)
 
     def test_sse_replays_done(self) -> None:
         created = self.client.post(
@@ -170,6 +233,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(denied_steps.status_code, 401)
         open_health = self.client.get("/health")
         self.assertEqual(open_health.status_code, 200)
+        open_ready = self.client.get("/ready")
+        self.assertEqual(open_ready.status_code, 200)
 
     def test_allowed_root(self) -> None:
         os.environ["MEWCODE_ALLOWED_ROOTS"] = self.workspace
@@ -352,7 +417,12 @@ class ApiTests(unittest.TestCase):
         with TestClient(app) as client:
             health = client.get("/health")
             self.assertEqual(health.status_code, 200)
-            self.assertEqual(health.json()["worker"], "down")
+            self.assertEqual(health.json(), {"status": "ok"})
+            not_ready = client.get("/ready")
+            self.assertEqual(not_ready.status_code, 503)
+            self.assertTrue(
+                "执行器不可用" in not_ready.text or "未能启动" in not_ready.text
+            )
             denied = client.post(
                 "/v1/runs",
                 json={"prompt": "hi", "workspace": self.workspace},
@@ -791,6 +861,12 @@ class ApiTests(unittest.TestCase):
         with TestClient(app) as client:
             health = client.get("/health")
             self.assertEqual(health.status_code, 200)
+            self.assertEqual(health.json(), {"status": "ok"})
+            not_ready = client.get("/ready")
+            self.assertEqual(not_ready.status_code, 503)
+            self.assertIn("任务库不可用", not_ready.text)
+            listed = client.get("/v1/runs")
+            self.assertEqual(listed.status_code, 200)
             denied = client.post(
                 "/v1/runs",
                 json={"prompt": "hi", "workspace": self.workspace},

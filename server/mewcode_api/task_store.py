@@ -205,6 +205,14 @@ class TaskStore:
             raise TaskStoreError("任务库不可用") from exc
         return conn
 
+    def ping(self) -> None:
+        """确认已经打开的库还能读。打不开时抛出任务库不可用。"""
+        try:
+            with self._lock:
+                self._connection().execute("SELECT 1")
+        except sqlite3.Error as exc:
+            raise TaskStoreError("任务库不可用") from exc
+
     def _connection(self) -> sqlite3.Connection:
         if self._conn is None:
             raise TaskStoreError("任务库不可用")

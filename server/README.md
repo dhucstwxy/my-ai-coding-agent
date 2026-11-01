@@ -72,7 +72,9 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/runs/wait -Method Post -ContentType "
 
 `POST /v1/runs/{runId}/cancel` 取消排队中或正在跑的任务。取消会先落盘，重启不会把它再跑起来。
 
-`GET /chat` 是一个单页。它用 `fetch` 读 SSE，因此可以带上 Bearer 令牌。`GET /health` 不要求令牌。
+`GET /chat` 是一个单页。它用 `fetch` 读 SSE，因此可以带上 Bearer 令牌。`GET /health` 和 `GET /ready` 不要求令牌。
+
+`GET /health` 只表示进程还在，执行器或任务库不可用时仍为 200。`GET /ready` 在执行器可用且任务库能打开时才为 200，否则为 503。列出对话和查询已有任务不看就绪。
 
 多轮：把上一轮 `report.sessionId` 作为下一次的 `sessionId`，并且使用同一个 `workspace`。
 
@@ -82,7 +84,21 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/runs/wait -Method Post -ContentType "
 
 如果用户消息已经写入会话（收到过 Agent 事件），续跑不会把同一句 prompt 再追加一遍。会话原文仍在 `<workspace>/.mewcode/api-sessions/`。
 
-Worker 起不来时，`/health` 为 `degraded`，提交接口返回 503，后台会重试拉起。运行中的 worker 若反复超时，重启次数用尽后也不再拉起。
+Worker 起不来或任务库打不开时，`/health` 仍为 200，`/ready` 为 503。提交接口返回 503，后台会重试拉起执行器。运行中的 worker 若反复超时，重启次数用尽后也不再拉起。列出对话和查询已有任务保持可用。
+
+## 日志
+
+标准输出是一行一个 JSON。一次任务的提交、开始、结束、失败带这些字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `event` | `task.submit`、`task.start`、`task.end`、`task.fail` |
+| `runId` | 任务号 |
+| `sessionId` | 会话号。提交时如果还没有，就是 `null` |
+| `status` | `queued`、`running`、`completed`、`failed`、`cancelled` |
+| `durationMs` | 从任务创建到这条日志的毫秒数。结束和失败用结束时间 |
+
+取消记为 `task.end`，`status` 为 `cancelled`。失败记为 `task.fail`。
 
 ## Docker
 

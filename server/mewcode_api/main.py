@@ -17,6 +17,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
+from mewcode_api.jsonlog import configure_logging
 from mewcode_api.models import (
     ApprovalBody,
     ConversationDetail,
@@ -126,30 +127,35 @@ def create_app(worker_cmd: list[str] | None = None) -> FastAPI:
             elapsed_ms = (time.perf_counter() - started) * 1000
             run_id = current_run_id.get() or run_id_from_path(request.url.path)
             log.info(
-                "%s %s -> %s %.0fms bytes=%s run=%s",
-                request.method,
-                request.url.path,
-                status,
-                elapsed_ms,
-                request.headers.get("content-length", "-"),
-                run_id or "-",
+                "请求",
+                extra={
+                    "event": "http",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "httpStatus": status,
+                    "durationMs": round(elapsed_ms),
+                    "runId": run_id or None,
+                },
             )
             current_run_id.reset(token)
 
     @app.get("/health")
     async def health() -> dict:
-        return {
-            "status": "ok" if worker.healthy else "degraded",
-            "worker": "ready" if worker.healthy else "down",
-            "queued": manager.queue.qsize(),
-            "runningRunId": manager.running_id,
-        }
+        return {"status": "ok"}
+
+    @app.get("/ready")
+    async def ready() -> dict:
+        reason = manager.readiness_error()
+        if reason:
+            raise HTTPException(status_code=503, detail=reason)
+        return {"status": "ok"}
 
     @app.get("/")
     async def root() -> dict:
         return {
             "service": "mewcode-agent",
             "health": "/health",
+            "ready": "/ready",
             "chat": "/chat",
             "docs": "/docs",
         }
@@ -423,12 +429,10 @@ app = create_app()
 def main() -> None:
     import uvicorn
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_logging()
     host = os.environ.get("MEWCODE_SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.environ.get("MEWCODE_SERVER_PORT", "8787"))
     token = os.environ.get("MEWCODE_SERVER_TOKEN", "")
     ensure_bind_token(host, token)
-    uvicorn.run(app, host=host, port=port)
+    # log_config=None：沿用上面的 JSON 行，不再套 uvicorn 的文本格式。
+    uvicorn.run(app, host=host, port=port, log_config=None)
