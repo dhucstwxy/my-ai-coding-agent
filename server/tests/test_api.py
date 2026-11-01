@@ -16,9 +16,32 @@ if str(SERVER_DIR) not in sys.path:
 
 from fastapi.testclient import TestClient
 
-from mewcode_api.main import create_app
+from mewcode_api.main import create_app, ensure_bind_token
 
 FAKE = Path(__file__).with_name("fake_worker.py")
+
+
+class BindTokenTests(unittest.TestCase):
+    def test_public_bind_without_token_exits(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            ensure_bind_token("0.0.0.0", "")
+        self.assertEqual(
+            caught.exception.code,
+            "监听所有网卡时必须设置 MEWCODE_SERVER_TOKEN",
+        )
+
+    def test_ipv6_public_bind_without_token_exits(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            ensure_bind_token("::", "   ")
+        self.assertIn("MEWCODE_SERVER_TOKEN", str(caught.exception.code))
+
+    def test_loopback_without_token_is_allowed(self) -> None:
+        ensure_bind_token("127.0.0.1", "")
+        ensure_bind_token("localhost", "")
+
+    def test_public_bind_with_token_is_allowed(self) -> None:
+        ensure_bind_token("0.0.0.0", "secret")
+        ensure_bind_token("::", "secret")
 
 
 class ApiTests(unittest.TestCase):

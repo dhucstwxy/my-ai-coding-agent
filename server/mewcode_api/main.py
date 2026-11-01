@@ -39,6 +39,16 @@ current_run_id: contextvars.ContextVar[str] = contextvars.ContextVar("run_id", d
 CHAT_HTML = Path(__file__).resolve().parent / "static" / "chat.html"
 
 
+# 这些地址表示监听所有网卡。容器里默认用 0.0.0.0。
+PUBLIC_BIND_HOSTS = frozenset({"0.0.0.0", "::"})
+
+
+def ensure_bind_token(host: str, token: str) -> None:
+    """监听所有网卡时必须带访问令牌，否则拒绝启动。"""
+    if host in PUBLIC_BIND_HOSTS and not token.strip():
+        raise SystemExit("监听所有网卡时必须设置 MEWCODE_SERVER_TOKEN")
+
+
 def require_token(authorization: str | None = Header(default=None)) -> None:
     expected = os.environ.get("MEWCODE_SERVER_TOKEN", "").strip()
     if not expected:
@@ -417,11 +427,8 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    host = os.environ.get("MEWCODE_SERVER_HOST", "127.0.0.1")
+    host = os.environ.get("MEWCODE_SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.environ.get("MEWCODE_SERVER_PORT", "8787"))
-    token = os.environ.get("MEWCODE_SERVER_TOKEN", "").strip()
-    if host in {"0.0.0.0", "::"} and not token:
-        log.warning(
-            "服务监听所有网卡，且未设置 MEWCODE_SERVER_TOKEN。工具调用会自动放行。"
-        )
+    token = os.environ.get("MEWCODE_SERVER_TOKEN", "")
+    ensure_bind_token(host, token)
     uvicorn.run(app, host=host, port=port)

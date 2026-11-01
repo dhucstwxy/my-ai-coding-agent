@@ -5,7 +5,7 @@
 ## 行为
 
 - 工具权限为自动放行，与 `mewcode run` 相同。
-- 默认只监听 `127.0.0.1`。要对网卡开放，请设置 `MEWCODE_SERVER_TOKEN`。
+- 默认只监听 `127.0.0.1`。监听 `0.0.0.0` 或 `::` 时必须设置 `MEWCODE_SERVER_TOKEN`，否则进程退出。
 - 全局串行：一个任务在跑时，新任务排队。
 - 会话文件在 `<workspace>/.mewcode/api-sessions/`，和 TUI 会话分开。
 - 配置查找与 CLI 相同：工作区 `.mewcode/config.yaml`，否则 `~/.mewcode/config.yaml`。密钥可用 `MEWCODE_API_KEY`。
@@ -27,7 +27,7 @@ $env:MEWCODE_API_KEY = "sk-xxx"
 
 | 变量 | 作用 |
 | --- | --- |
-| `MEWCODE_SERVER_HOST` | 监听地址，默认 `127.0.0.1` |
+| `MEWCODE_SERVER_HOST` | 监听地址，默认 `127.0.0.1`。设为 `0.0.0.0` 或 `::` 时必须同时设置令牌 |
 | `MEWCODE_SERVER_PORT` | 端口，默认 `8787` |
 | `MEWCODE_SERVER_TOKEN` | 设置后，`/v1/*` 需要 `Authorization: Bearer <token>` |
 | `MEWCODE_SERVER_DATA` | 运行记录目录，默认 `~/.mewcode/server` |
@@ -83,3 +83,19 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/runs/wait -Method Post -ContentType "
 如果用户消息已经写入会话（收到过 Agent 事件），续跑不会把同一句 prompt 再追加一遍。会话原文仍在 `<workspace>/.mewcode/api-sessions/`。
 
 Worker 起不来时，`/health` 为 `degraded`，提交接口返回 503，后台会重试拉起。运行中的 worker 若反复超时，重启次数用尽后也不再拉起。
+
+## Docker
+
+HTTP 镜像和终端镜像是两个构建目标。HTTP 镜像里有 Python 接口和编译后的 Node 执行器。容器默认监听所有网卡，因此必须带访问令牌。
+
+```powershell
+docker build --target server -t mewcode:server .
+docker run --rm -p 8787:8787 `
+  -e MEWCODE_SERVER_TOKEN="change-me" `
+  -e MEWCODE_API_KEY="sk-xxx" `
+  -v mewcode-data:/var/lib/mewcode `
+  -v "${PWD}:/workspace" `
+  mewcode:server
+```
+
+`/var/lib/mewcode` 是任务库。`/workspace` 是默认工作区。未设置令牌时容器会退出，并提示设置 `MEWCODE_SERVER_TOKEN`。终端镜像仍用默认目标：`docker build -t mewcode:local .`。

@@ -139,8 +139,11 @@ docker tag docker.m.daocloud.io/library/node:20-bookworm-slim node:20-bookworm-s
 ```
 
 ```bash
-# 构建镜像
+# 终端镜像（默认目标，也可写 --target cli）
 docker build -t mewcode:local .
+
+# HTTP 服务镜像：Python 接口和 Node 执行器在同一容器
+docker build --target server -t mewcode:server .
 
 # 交互运行（TUI 必须加 -it；密钥用 -e 注入）
 # Windows PowerShell 示例
@@ -159,6 +162,17 @@ docker run --rm -it `
 - 镜像内已含 `git`、`tmux`；团队模式请在 tmux 会话内启动
 - 评测：`docker run --rm -e MEWCODE_API_KEY=sk-xxx -v "${PWD}:/workspace" -w /workspace mewcode:local eval --help`
 - 无头：`docker run --rm -e MEWCODE_API_KEY=sk-xxx -v "${PWD}:/workspace" -w /workspace mewcode:local run --help`
+
+HTTP 服务使用 `mewcode:server`。它监听 `0.0.0.0:8787`，必须带 `MEWCODE_SERVER_TOKEN`。数据目录挂在 `/var/lib/mewcode`，工作区挂在 `/workspace`。
+
+```powershell
+docker run --rm -p 8787:8787 `
+  -e MEWCODE_SERVER_TOKEN="change-me" `
+  -e MEWCODE_API_KEY="sk-xxx" `
+  -v mewcode-data:/var/lib/mewcode `
+  -v "${PWD}:/workspace" `
+  mewcode:server
+```
 
 ## 文档
 
